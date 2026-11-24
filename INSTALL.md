@@ -44,29 +44,54 @@
 
 ---
 
-## 一、本机 macOS 隔离环境搭建
+## 一、本机 macOS 一键隔离部署（推荐）
+
+如果希望一条命令完成全部本机初始化（建受限用户 `sshops` + 建目录 + 安装 3 个 Rust 二进制 + 生成 AI 专用 Key + 初始化配置模板 + 软链 Skill + 注册并启动 `launchd`），直接运行 [deploy/0-bootstrap-macos.sh](deploy/0-bootstrap-macos.sh)：
+
+```bash
+cd /path/to/safe-server-ops-skill
+sudo ./deploy/0-bootstrap-macos.sh <username>
+```
+
+完成后用交互式脚本一键添加生产服务器并自动信任 SSH 指纹（也支持直接从现有 `ssh_login.sh` 配置一键转换导入，原文件与原私钥**绝不改动**）：
+
+```bash
+# 方式 1：从现有 ~/.local/config/ssh_login/.ssh-servers.env 一键导入
+#   --key-mode ai   （默认推荐）：将 KEY_FILE 改指向 AI 专用私钥（需在生产机贴入 AI 公钥）
+#   --key-mode copy （快速试跑）：把原私钥只读复制到 /Users/sshops/.ssh/ 下，原私钥丝毫不动
+sudo ./deploy/4-add-server.sh --import-ssh-login --key-mode ai
+# 可加 --only prod-a,prod-b 仅导入指定代号，或加 --dry-run 先预览：
+./deploy/4-add-server.sh --import-ssh-login --dry-run
+
+# 方式 2：交互式手动录入单台服务器
+sudo ./deploy/4-add-server.sh
+```
+
+然后再按需编辑白名单策略并重载：
+
+```bash
+sudo vim /Users/sshops/.local/config/opsd/policy.yaml
+sudo launchctl kickstart -k system/com.local.safe-server-opsd
+```
+
+> 若想分步手动执行或排查细节，下方保留了按数字顺序排列（`1 -> 2 -> 3 -> 4`）的完整分步说明。
+
+---
+
+## 一（备查）、本机 macOS 分步搭建详情
 
 ### 第 1 步：创建共享组 `opsclients` 与隐藏无登录用户 `sshops`
 
+直接运行自动建号脚本 [deploy/1-create-sshops-user.sh](deploy/1-create-sshops-user.sh)（自动挑选 450~499 间的空闲 UID、锁死密码、禁用交互 Shell、从登录界面隐藏并设置家目录为 `/Users/sshops`）：
+
 ```bash
-# 1. 创建组 opsclients，并将日常用户加入该组
-sudo dseditgroup -o create opsclients
-sudo dseditgroup -o edit -a <username> -t user opsclients
+cd /path/to/safe-server-ops-skill
 
-# 2. 获取 opsclients 组 GID
-OPS_GID=$(dscl . -read /Groups/opsclients PrimaryGroupID | awk '{print $2}')
+# 可选：先预演查看将要执行的命令（无需 sudo，不改动系统）
+./deploy/1-create-sshops-user.sh --dry-run <username>
 
-# 3. 检查 UID 455 是否空闲（无输出即表示可用；若被占用则换一个 450~499 之间的数字）
-dscl . -list /Users UniqueID | awk '$2 == 455'
-
-# 4. 创建隐藏无登录系统用户 sshops（家目录设为 /Users/sshops，禁止交互式登录）
-sudo dscl . -create /Users/sshops
-sudo dscl . -create /Users/sshops UserShell /usr/bin/false
-sudo dscl . -create /Users/sshops RealName "Safe Server Ops Daemon"
-sudo dscl . -create /Users/sshops UniqueID 455
-sudo dscl . -create /Users/sshops PrimaryGroupID "$OPS_GID"
-sudo dscl . -create /Users/sshops NFSHomeDirectory /Users/sshops
-sudo dscl . -create /Users/sshops IsHidden 1
+# 正式创建
+sudo ./deploy/1-create-sshops-user.sh <username>
 ```
 
 > **注意**：将 `<username>` 加入新组 `opsclients` 后，需**新开一个终端窗口**（或重新登录会话）才能使新组权限生效；执行 `id` 看到 `opsclients` 即表示已生效。
@@ -75,11 +100,11 @@ sudo dscl . -create /Users/sshops IsHidden 1
 
 ### 第 2 步：初始化隔离目录结构与权限
 
-进入项目根目录运行初始化脚本 [deploy/setup-macos-isolation.sh](deploy/setup-macos-isolation.sh)：
+进入项目根目录运行初始化脚本 [deploy/2-setup-macos-isolation.sh](deploy/2-setup-macos-isolation.sh)：
 
 ```bash
 cd /path/to/safe-server-ops-skill
-sudo ./deploy/setup-macos-isolation.sh <username>
+sudo ./deploy/2-setup-macos-isolation.sh <username>
 ```
 
 ---
@@ -91,7 +116,7 @@ sudo ./deploy/setup-macos-isolation.sh <username>
 ```bash
 cd /path/to/safe-server-ops-skill
 cargo build --release
-sudo ./deploy/install.sh <username>
+sudo ./deploy/3-install.sh <username>
 ```
 
 脚本会自动将 `target/release/` 下的 3 个单文件二进制安装到隔离位置：
@@ -177,7 +202,28 @@ sudo chmod 600 \
 
 ## 二、生产服务器（Linux）纵深防御配置
 
-### 第 6 步：创建受限账号 `ai-ops` 并绑定 `ForceCommand` / `rrsync`
+> **可以不创建新 Linux 用户！**  
+> OpenSSH 的 `authorized_keys` 是**按公钥生效**的：你可以直接复用现有的运维用户（如 `ubuntu` / `deploy` / `root`）——你自己的主公钥照常获得完整交互式 Shell，而 AI 专用公钥会被 `ForceCommand` / `rrsync` 锁死在白名单门控脚本内。如需更强隔离，再加 `--create-user` 建独立 `ai-ops` 用户即可。
+
+### 推荐方式：生产机一键脚本安装
+
+将仓库中的 `remote/` 目录上传到生产服务器后运行 [remote/install-remote-gate.sh](remote/install-remote-gate.sh)：
+
+```bash
+# 复用已有用户（例如 ubuntu），不新建账号：
+sudo ./remote/install-remote-gate.sh \
+  --user ubuntu \
+  --ops-pubkey "<粘贴 /Users/sshops/.ssh/id_ed25519_ai_ops.pub>" \
+  --sync-pubkey "<粘贴 /Users/sshops/.ssh/id_ed25519_ai_rrsync.pub>" \
+  --sync-dir /var/www/你的发布目录
+
+# 然后按你服务器实际路径编辑顶部白名单：
+sudo vim /usr/local/bin/ai-ops-gate.sh
+```
+
+> 如需新建独立低权限用户 `ai-ops`，把 `--user ubuntu` 换成 `--user ai-ops --create-user` 即可。
+
+### 第 6 步（手动备查）：创建受限账号 `ai-ops` 并绑定 `ForceCommand` / `rrsync`
 
 登录生产服务器后执行：
 
@@ -312,7 +358,7 @@ sudo -u sshops /Users/sshops/.local/bin/ops-approve --list
 ```bash
 cd /path/to/safe-server-ops-skill
 cargo build --release
-sudo ./deploy/install.sh <username>
+sudo ./deploy/3-install.sh <username>
 sudo launchctl kickstart -k system/com.local.safe-server-opsd
 ```
 

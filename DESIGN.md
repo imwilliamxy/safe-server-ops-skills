@@ -379,8 +379,11 @@ safe-server-ops-skill/
 │   ├── ai-ops-gate.sh             # 服务端 sudoers 白名单门控脚本
 │   └── ai-ops-ssh-entry.sh        # authorized_keys ForceCommand 入口
 └── deploy/
-    ├── install.sh                 # 编译并双端隔离安装 3 个原生二进制
-    ├── setup-macos-isolation.sh   # 初始化 /Users/sshops 与共享 Socket/Staging 目录
+    ├── 0-bootstrap-macos.sh       # 一键全自动部署入口（串联 1->2->3 + Key/模板/Skill/launchd）
+    ├── 1-create-sshops-user.sh    # 第 1 步：创建隐藏受限用户 sshops 与组 opsclients
+    ├── 2-setup-macos-isolation.sh # 第 2 步：初始化 /Users/sshops 与共享 Socket/Staging 目录
+    ├── 3-install.sh               # 第 3 步：编译并双端隔离安装 3 个原生二进制
+    ├── 4-add-server.sh            # 第 4 步：交互录入或导入 ssh_login.sh 配置 + 写 known_hosts
     ├── com.local.safe-server-opsd.plist  # macOS launchd 守护进程配置（以 sshops 运行）
     ├── opsd.example.conf          # opsd.conf 主配置模板
     ├── ssh-servers.example.env    # 服务器凭据模板

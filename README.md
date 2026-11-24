@@ -58,7 +58,8 @@ export OPS_SOCKET=/tmp/ops.sock
 完整 8 步安装、服务端加固、验收与排障步骤见 **[INSTALL.md](INSTALL.md)**：
 
 ```bash
+# 一键全自动部署（依次执行 1->2->3 并初始化 Key、配置模板、Skill 与 launchd）
 cargo build --release
-sudo ./deploy/setup-macos-isolation.sh <username>
-sudo ./deploy/install.sh <username>
+sudo ./deploy/0-bootstrap-macos.sh <username>
+sudo ./deploy/4-add-server.sh --import-ssh-login --key-mode ai
 ```

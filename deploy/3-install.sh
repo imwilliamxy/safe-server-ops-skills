@@ -26,7 +26,7 @@ if ! id "$DAILY_USER" >/dev/null 2>&1; then
     exit 1
 fi
 if ! id "$OPS_USER" >/dev/null 2>&1; then
-    echo "Isolated user '$OPS_USER' does not exist yet. Create '$OPS_USER' and run setup-macos-isolation.sh first." >&2
+    echo "Isolated user '$OPS_USER' does not exist yet. Run 'sudo ./deploy/1-create-sshops-user.sh ${DAILY_USER}' and 'sudo ./deploy/2-setup-macos-isolation.sh ${DAILY_USER}' first." >&2
     exit 1
 fi
 

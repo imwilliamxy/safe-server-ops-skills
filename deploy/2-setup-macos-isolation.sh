@@ -29,7 +29,7 @@ dseditgroup -o edit -a "$DAILY_USER" -t user "$OPS_GROUP"
 echo "[2/5] Verify isolated user '$OPS_USER' exists..."
 if ! id "$OPS_USER" >/dev/null 2>&1; then
     echo "User '$OPS_USER' does not exist yet." >&2
-    echo "Create hidden non-login user '$OPS_USER' with NFSHomeDirectory ${OPS_HOME} and UserShell /usr/bin/false first, then re-run." >&2
+    echo "Run 'sudo ./deploy/1-create-sshops-user.sh ${DAILY_USER}' first, then re-run this script." >&2
     exit 1
 fi
 dseditgroup -o edit -a "$OPS_USER" -t user "$OPS_GROUP"
@@ -61,7 +61,7 @@ cat <<EOF
        - policy.yaml       (from deploy/policy.example.yaml)
   3. Pre-populate ${OPS_HOME}/.ssh/known_hosts with trusted production host keys
   4. Install binaries:
-       sudo ./deploy/install.sh ${DAILY_USER}
+       sudo ./deploy/3-install.sh ${DAILY_USER}
      -> ${OPS_HOME}/.local/bin/{opsd,ops-approve} (isolated to ${OPS_USER})
      -> /Users/${DAILY_USER}/.local/bin/opsctl    (credential-less CLI for daily user & AI)
   5. Load launchd daemon:
