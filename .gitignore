@@ -23,3 +23,6 @@ staging/
 .DS_Store
 .vscode/
 .idea/
+
+# Local changelog
+CHANGELOG.md
