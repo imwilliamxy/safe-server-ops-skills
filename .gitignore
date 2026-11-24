@@ -1,0 +1,32 @@
+# Secrets & runtime configs (NEVER commit)
+.ssh-servers.env
+*.env
+!deploy/*.example.env
+policy.yaml
+*.key
+*.pem
+id_ed25519*
+id_rsa*
+known_hosts*
+
+# Runtime sockets, logs & staging
+*.sock
+audit.jsonl
+*.log
+staging/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+.pytest_cache/
+
+# OS & Editors
+.DS_Store
+.vscode/
+.idea/

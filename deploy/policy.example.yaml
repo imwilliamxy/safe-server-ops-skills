@@ -1,0 +1,71 @@
+# Example policy for safe-server-ops (opsd)
+# Copy to /var/lib/sshops/policy.yaml and chmod 600 (owned by sshops)
+
+global:
+  plan_ttl_seconds: 180
+  max_output_bytes: 65536
+  default_timeout_seconds: 20
+  # true = call remote ForceCommand / ai-ops-gate structured actions (recommended for prod)
+  # false = execute tightly escaped read-only commands directly over SSH (for initial transition)
+  gate_mode: true
+  # Set to "yes" in production (pre-populate known_hosts for sshops).
+  # May be set to "accept-new" only during initial controlled onboarding.
+  strict_host_key_checking: "yes"
+  # Optional explicit known_hosts path owned by sshops
+  known_hosts_file: "/var/lib/sshops/.ssh/known_hosts"
+  global_excludes:
+    - ".git/"
+    - ".env"
+    - ".env.*"
+    - "*.pem"
+    - "*.key"
+    - "node_modules/"
+    - "wp-config.php"
+
+servers:
+  prod-web-1:
+    description: "Primary production web node"
+    logs:
+      nginx-error:
+        type: file
+        path: /var/log/nginx/error.log
+        max_lines: 500
+      app-container:
+        type: docker
+        container: web-app
+        max_lines: 500
+
+    docker:
+      allowed_containers:
+        - web-app
+        - nginx-proxy
+      allowed_compose:
+        web-stack:
+          workdir: /srv/stacks/web
+          services:
+            - web
+            - worker
+
+    configs:
+      nginx-site:
+        path: /etc/nginx/conf.d/app.conf
+        backup_dir: /var/backups/ai-ops/nginx
+        validator: nginx_test
+        reload_action: nginx_reload
+        redact_patterns:
+          - "(?i)(password|secret|token|api_key)\\s*[:=]\\s*\\S+"
+
+sync_targets:
+  wp-plugin-release:
+    description: "Push built plugin release artifacts to prod-web-1"
+    server: prod-web-1
+    direction: push
+    local_base: /var/tmp/sshops-staging/wp-plugin-release
+    remote_base: /var/www/html/wp-content/plugins/my-plugin
+    # Set true when SYNC_KEY_FILE uses ForceCommand rrsync (remote path becomes '.')
+    use_rrsync: true
+    allow_delete: false
+    max_delete_files: 20
+    max_files: 300
+    max_size_mb: 50
+    exclude_file: /var/lib/sshops/excludes/wp-plugin.exclude
