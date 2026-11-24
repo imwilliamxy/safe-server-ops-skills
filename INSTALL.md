@@ -9,7 +9,7 @@
 
 ## 前置条件
 
-* 本机（macOS）：已安装 `uv`、Python 3.11+、OpenSSH、`rsync`。
+* 本机（macOS）：已安装 Rust 工具链（`cargo`，仅编译构建时需要；运行时**零 Python / 零外部运行时依赖**）、OpenSSH、`rsync`。
 * 生产服务器（Linux）：拥有 `sudo` / `root` 权限用于创建受限运维账号 `ai-ops` 与安装门控脚本。
 
 ### 安装完成后的最终目录与权限布局
@@ -18,9 +18,8 @@
 隔离账号（/Users/sshops，权限 700，日常账号与 AI 均不可读、不可篡改）
 ├── /Users/sshops/.local/
 │   ├── bin/
-│   │   ├── opsd                      # 后台守护进程
-│   │   └── ops-approve               # 人类独立审批工具
-│   ├── venv/safe-server-ops/         # sshops 独占 Python 虚拟环境
+│   │   ├── opsd                      # 后台守护进程（单文件原生二进制，700）
+│   │   └── ops-approve               # 人类独立审批工具（单文件原生二进制，700）
 │   ├── config/opsd/
 │   │   ├── opsd.conf                 # 主入口配置（600）
 │   │   ├── .ssh-servers.env          # 服务器凭据（600）
@@ -34,8 +33,7 @@
 
 日常账号（/Users/<username>，AI Agent 运行域，零凭据）
 └── /Users/<username>/.local/
-    ├── bin/opsctl                    # 零凭据客户端（仅连 ops.sock）
-    └── venv/safe-server-ops/         # 客户端独立虚拟环境
+    └── bin/opsctl                    # 零凭据客户端（单文件原生二进制，仅连 ops.sock）
 
 共享通信与发布中转
 ├── /var/run/sshops/ops.sock          # 660 (sshops:opsclients) — 业务通道
@@ -85,20 +83,20 @@ sudo ./deploy/setup-macos-isolation.sh <username>
 
 ---
 
-### 第 3 步：双端隔离安装 `opsd` / `ops-approve` / `opsctl`
+### 第 3 步：编译并双端隔离安装 `opsd` / `ops-approve` / `opsctl`
 
-运行安装脚本 [deploy/install.sh](deploy/install.sh)：
+先编译 Release 二进制，再运行安装脚本 [deploy/install.sh](deploy/install.sh)：
 
 ```bash
+cargo build --release
 sudo ./deploy/install.sh <username>
 ```
 
 脚本会自动：
-1. 用 `uv` 将当前源码打包为 wheel；
-2. 安装至 `/Users/sshops/.local/venv/safe-server-ops`，软链出 `/Users/sshops/.local/bin/opsd` 与 `/Users/sshops/.local/bin/ops-approve`（属主 `sshops`，权限 `go-rwx`）；
-3. 安装零凭据客户端至 `/Users/<username>/.local/venv/safe-server-ops`，软链出 `/Users/<username>/.local/bin/opsctl`。
+1. 将单文件二进制 `opsd` 与 `ops-approve` 安装至 `/Users/sshops/.local/bin/`（属主 `sshops`，权限 `700`，日常账号与 AI 无法读取或覆盖）；
+2. 将零凭据单文件客户端 `opsctl` 安装至 `/Users/<username>/.local/bin/opsctl`（权限 `755`）。
 
-请确认 `/Users/<username>/.local/bin` 已在你的 `PATH` 中（如未加入，在 `~/.zshrc` 中添加 `export PATH="$HOME/.local/bin:$PATH"`）。
+完全不依赖 Python 或虚拟环境。请确认 `/Users/<username>/.local/bin` 已在你的 `PATH` 中（如未加入，在 `~/.zshrc` 中添加 `export PATH="$HOME/.local/bin:$PATH"`）。
 
 ---
 
@@ -295,6 +293,7 @@ sudo -u sshops /Users/sshops/.local/bin/ops-approve --list
 
 ```bash
 cd /path/to/safe-server-ops-skill
+cargo build --release
 sudo ./deploy/install.sh <username>
 sudo launchctl kickstart -k system/com.local.safe-server-opsd
 ```
@@ -333,7 +332,6 @@ sudo tail -n 50 /Users/sshops/.local/state/opsd/audit.jsonl
 sudo launchctl bootout system /Library/LaunchDaemons/com.local.safe-server-opsd.plist || true
 sudo rm -f /Library/LaunchDaemons/com.local.safe-server-opsd.plist
 rm -f /Users/<username>/.local/bin/opsctl ~/.gemini/config/skills/safe-server-ops
-rm -rf /Users/<username>/.local/venv/safe-server-ops
 sudo rm -rf /var/run/sshops /var/tmp/sshops-staging /Users/sshops
 sudo dscl . -delete /Users/sshops
 sudo dseditgroup -o delete opsclients

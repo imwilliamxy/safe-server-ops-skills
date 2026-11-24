@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Install safe-server-ops in strict OS-isolated per-user layout on macOS:
+# Build and install zero-dependency Rust binaries in strict OS-isolated per-user layout on macOS:
 # - Isolated user (sshops):
-#     /Users/sshops/.local/bin/opsd
-#     /Users/sshops/.local/bin/ops-approve
-#     (backed by /Users/sshops/.local/venv/safe-server-ops, chmod 700, invisible to daily user & AI)
+#     /Users/sshops/.local/bin/opsd         (chmod 700, owned by sshops)
+#     /Users/sshops/.local/bin/ops-approve  (chmod 700, owned by sshops)
 # - Daily user (<username>):
-#     /Users/<username>/.local/bin/opsctl
-#     (backed by /Users/<username>/.local/venv/safe-server-ops, zero credentials)
+#     /Users/<username>/.local/bin/opsctl   (chmod 755, zero credentials)
 set -euo pipefail
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
@@ -36,51 +34,39 @@ DAILY_GROUP=$(id -gn "$DAILY_USER")
 DAILY_HOME=$(dscl . -read "/Users/$DAILY_USER" NFSHomeDirectory | awk '{print $2}')
 OPS_HOME=$(dscl . -read "/Users/$OPS_USER" NFSHomeDirectory | awk '{print $2}')
 
-DAILY_VENV="${DAILY_HOME}/.local/venv/safe-server-ops"
 DAILY_BIN="${DAILY_HOME}/.local/bin"
-OPS_VENV="${OPS_HOME}/.local/venv/safe-server-ops"
 OPS_BIN="${OPS_HOME}/.local/bin"
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+RELEASE_DIR="${REPO_DIR}/target/release"
 
-UV_BIN="$(command -v uv || true)"
-if [[ -z "$UV_BIN" && -x /opt/homebrew/bin/uv ]]; then
-    UV_BIN="/opt/homebrew/bin/uv"
+if [[ ! -x "${RELEASE_DIR}/opsd" || ! -x "${RELEASE_DIR}/opsctl" || ! -x "${RELEASE_DIR}/ops-approve" ]]; then
+    echo "[1/3] Building release binaries as ${DAILY_USER} (cargo build --release)..."
+    CARGO_BIN="${DAILY_HOME}/.cargo/bin/cargo"
+    if [[ ! -x "$CARGO_BIN" ]]; then
+        CARGO_BIN="$(command -v cargo || true)"
+    fi
+    if [[ -z "$CARGO_BIN" ]]; then
+        echo "cargo not found. Build first with 'cargo build --release' as ${DAILY_USER}, then re-run." >&2
+        exit 1
+    fi
+    sudo -u "$DAILY_USER" bash -c "cd $(printf '%q' "$REPO_DIR") && $(printf '%q' "$CARGO_BIN") build --release"
+else
+    echo "[1/3] Using existing release binaries in ${RELEASE_DIR}..."
 fi
-if [[ -z "$UV_BIN" ]]; then
-    echo "uv not found in PATH or /opt/homebrew/bin/uv." >&2
-    exit 1
-fi
 
-echo "[1/4] Building wheel from ${REPO_DIR} into temporary staging..."
-TMP_DIST=$(mktemp -d /tmp/safe-server-ops-dist.XXXXXX)
-cleanup() { rm -rf -- "$TMP_DIST"; }
-trap cleanup EXIT
-"$UV_BIN" build --wheel --out-dir "$TMP_DIST" "$REPO_DIR"
-WHEEL_FILE=$(ls -1 "${TMP_DIST}"/safe_server_ops-*.whl | head -n 1)
-chmod 755 "$TMP_DIST"
-chmod 644 "$WHEEL_FILE"
+echo "[2/3] Installing isolated binaries into ${OPS_BIN} (owned by ${OPS_USER}, chmod 700)..."
+install -d -m 700 -o "$OPS_USER" -g "$OPS_GROUP" "${OPS_HOME}/.local" "$OPS_BIN"
+install -m 700 -o "$OPS_USER" -g "$OPS_GROUP" "${RELEASE_DIR}/opsd" "${OPS_BIN}/opsd"
+install -m 700 -o "$OPS_USER" -g "$OPS_GROUP" "${RELEASE_DIR}/ops-approve" "${OPS_BIN}/ops-approve"
 
-echo "[2/4] Installing isolated daemon & approval CLI into ${OPS_BIN} (owned by ${OPS_USER})..."
-install -d -m 700 -o "$OPS_USER" -g "$OPS_GROUP" "${OPS_HOME}/.local" "${OPS_HOME}/.local/venv" "$OPS_BIN"
-"$UV_BIN" venv --allow-existing --python 3.11 "$OPS_VENV"
-"$UV_BIN" pip install --python "${OPS_VENV}/bin/python" --reinstall "$WHEEL_FILE"
-ln -sfn "${OPS_VENV}/bin/opsd" "${OPS_BIN}/opsd"
-ln -sfn "${OPS_VENV}/bin/ops-approve" "${OPS_BIN}/ops-approve"
-chown -R "${OPS_USER}:${OPS_GROUP}" "${OPS_HOME}/.local/venv" "$OPS_BIN"
-chmod -R go-rwx "${OPS_HOME}/.local/venv" "$OPS_BIN"
+echo "[3/3] Installing credential-less 'opsctl' into ${DAILY_BIN} (owned by ${DAILY_USER})..."
+install -d -m 755 -o "$DAILY_USER" -g "$DAILY_GROUP" "${DAILY_HOME}/.local" "$DAILY_BIN"
+install -m 755 -o "$DAILY_USER" -g "$DAILY_GROUP" "${RELEASE_DIR}/opsctl" "${DAILY_BIN}/opsctl"
 
-echo "[3/4] Installing credential-less 'opsctl' into ${DAILY_BIN} (owned by ${DAILY_USER})..."
-install -d -m 755 -o "$DAILY_USER" -g "$DAILY_GROUP" "${DAILY_HOME}/.local" "${DAILY_HOME}/.local/venv" "$DAILY_BIN"
-"$UV_BIN" venv --allow-existing --python 3.11 "$DAILY_VENV"
-"$UV_BIN" pip install --python "${DAILY_VENV}/bin/python" --reinstall "$WHEEL_FILE"
-ln -sfn "${DAILY_VENV}/bin/opsctl" "${DAILY_BIN}/opsctl"
-chown -R "${DAILY_USER}:${DAILY_GROUP}" "$DAILY_VENV"
-chown -h "${DAILY_USER}:${DAILY_GROUP}" "${DAILY_BIN}/opsctl"
-
-echo "[4/4] Installation complete:"
-ls -ld "${DAILY_BIN}/opsctl" "${OPS_BIN}/opsd" "${OPS_BIN}/ops-approve"
+echo "Installation complete (zero Python / venv dependencies):"
+ls -lh "${DAILY_BIN}/opsctl" "${OPS_BIN}/opsd" "${OPS_BIN}/ops-approve"
 cat <<EOF
 
 Layout summary:

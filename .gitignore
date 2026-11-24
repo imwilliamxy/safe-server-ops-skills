@@ -16,16 +16,8 @@ audit.jsonl
 *.log
 staging/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-.venv/
-venv/
-build/
-dist/
-*.egg-info/
-.pytest_cache/
+# Rust
+/target/
 
 # OS & Editors
 .DS_Store

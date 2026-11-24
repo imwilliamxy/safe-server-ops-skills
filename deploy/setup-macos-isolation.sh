@@ -40,7 +40,6 @@ install -d -m 700 -o "$OPS_USER" -g "$OPS_GROUP" \
     "${OPS_HOME}/.ssh" \
     "${OPS_HOME}/.local" \
     "${OPS_HOME}/.local/bin" \
-    "${OPS_HOME}/.local/venv" \
     "${OPS_HOME}/.local/config" \
     "${OPS_HOME}/.local/config/opsd" \
     "${OPS_HOME}/.local/config/opsd/excludes" \
