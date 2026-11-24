@@ -59,7 +59,7 @@ flowchart TB
         Gate["风险分级与两阶段审批状态机<br/>(Plan Token + TTL + 指纹校验 + 熔断)"]
         Exec["安全执行器<br/>(subprocess shell=False, 无参数注入)"]
         Redact["输出脱敏引擎<br/>(HOST/USER/KEY/IP/Secret 替换)"]
-        Audit["只追加审计日志<br/>(/var/log/sshops/audit.jsonl)"]
+        Audit["只追加审计日志<br/>(/Users/sshops/.local/state/opsd/audit.jsonl)"]
     end
 
     subgraph ProdZone["生产服务器（纵深防御）"]
@@ -86,7 +86,7 @@ flowchart TB
 
 | 维度 | 过渡版（本机快速验证） | 生产真隔离版（推荐最终形态） |
 | :--- | :--- | :--- |
-| `opsd` 运行身份 | 当前用户后台进程（仅防上下文与云端日志泄露） | 独立无登录系统用户 `sshops`（`launchd` 托管），日常用户与 AI 均无权限读 `/var/lib/sshops/` |
+| `opsd` 运行身份 | 当前用户后台进程（仅防上下文与云端日志泄露） | 独立无登录系统用户 `sshops`（`launchd` 托管），日常用户与 AI 均无权限读 `/Users/sshops/` |
 | 通信通道 | `~/.local/state/sshops/ops.sock`（`chmod 600`） | `/var/run/sshops/ops.sock`（`chown sshops:opsclients`, `chmod 660`） |
 | 审批把关 | 客户端命令前缀拦截 | `opsd` 强制校验人类独立审批（`sudo` + Touch ID 或带外通知确认） |
 
@@ -110,7 +110,7 @@ skills/safe-server-ops/
 * **强制按需阅读**：在 `SKILL.md` 中指明“仅在执行对应类型操作时读取 `references/` 下对应子文档”，避免一次性塞入全部细节。
 * **行为铁律**：
   1. 始终先调用 `opsctl capabilities` 发现可用逻辑代号，绝不猜测或向用户索要生产 IP/密钥；
-  2. 严禁尝试读取 `/var/lib/sshops/`、`~/.ssh/` 或其他凭据目录；
+  2. 严禁尝试读取 `/Users/sshops/`、`~/.ssh/` 或其他凭据目录；
   3. 遇到需要人工审批的 `plan_token` 时，必须清晰向用户展示变更摘要/Diff，暂停并等待用户完成独立审批后再执行 `apply`。
 
 ---
@@ -128,8 +128,8 @@ skills/safe-server-ops/
 HOST=203.0.113.10
 USER=ai-ops
 PORT=22
-KEY_FILE=/var/lib/sshops/.ssh/id_ed25519_ai_ops
-SYNC_KEY_FILE=/var/lib/sshops/.ssh/id_ed25519_ai_rrsync
+KEY_FILE=/Users/sshops/.ssh/id_ed25519_ai_ops
+SYNC_KEY_FILE=/Users/sshops/.ssh/id_ed25519_ai_rrsync
 ```
 
 ### 4.2 声明式策略文件（`policy.yaml`）
@@ -194,7 +194,7 @@ sync_targets:
     max_delete_files: 20                # 即便允许 delete，超过阈值直接熔断
     max_files: 300
     max_size_mb: 50
-    exclude_file: /var/lib/sshops/excludes/wp-plugin.exclude
+    exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude
 ```
 
 ---
@@ -296,9 +296,10 @@ sync_targets:
 
 ### 6.2 安全执行器规范（防命令注入与软链逃逸）
 
-* **本地执行**：一律 `subprocess.run(argv_list, shell=False, timeout=...)`，严禁 `shell=True`。
+* **本地执行**：Rust `std::process::Command` 直接以 `argv` 数组走 `execve` 启动（天然无 Shell 解析注入风险），配合独立管道读取线程与超时强杀。
+* **内存密文清理**：`config_plan` / `config_apply` 还原的明文配置使用 `zeroize::Zeroizing<String>` 托管，消费或释放后自动擦除堆内存。
 * **SSH 固定选项**：`-o BatchMode=yes -o IdentitiesOnly=yes -o ForwardAgent=no -o StrictHostKeyChecking=yes -o ConnectTimeout=10`。
-* **`rsync` 固定选项**：`-rltz --no-owner --no-group --no-devices --no-specials --safe-links --itemize-changes --timeout=30`（不用模糊的 `-a`，严禁 `-L` / `--copy-links`，绝不接受外部注入 `-e` / `--rsync-path` / `--files-from`）。
+* **`rsync` 固定选项**：`-rltz --no-owner --no-group --no-perms --no-devices --no-specials --safe-links --itemize-changes --stats --timeout=30`（不用模糊的 `-a`，严禁 `-L` / `--copy-links`，绝不接受外部注入 `-e` / `--rsync-path` / `--files-from`）。
 
 ### 6.3 生产服务器侧加固
 
@@ -319,7 +320,7 @@ sync_targets:
 
 ### 6.4 审计日志
 
-在 `/var/log/sshops/audit.jsonl` 以只追加方式记录每次请求与审批事件：
+在 `/Users/sshops/.local/state/opsd/audit.jsonl` 以只追加（`0600`）方式记录每次请求与审批事件：
 
 ```json
 {
@@ -338,41 +339,52 @@ sync_targets:
 
 ---
 
-## 7. 项目目录结构（含可选薄 MCP 扩展口）
+## 7. 项目目录结构（纯 Rust 零依赖单二进制实现）
 
-建议作为独立项目维护（不要放进业务代码仓库，避免误提交）：
+独立仓库维护（不要放进业务代码仓库，避免误提交）：
 
 ```text
 safe-server-ops-skill/
-├── pyproject.toml
+├── Cargo.toml
+├── Cargo.lock
+├── DESIGN.md / INSTALL.md / README.md
 ├── skills/safe-server-ops/        # 渐进式 Skill 目录（安装到 Agent 的 skills 目录）
 │   ├── SKILL.md
 │   └── references/
 │       ├── logs-and-docker.md
 │       ├── rsync-deploy.md
 │       └── config-change.md
-├── src/safe_server_ops/
-│   ├── cli.py                     # opsctl：极简无凭据客户端（通过 Unix Socket 通信）
-│   ├── approve_cli.py             # ops-approve：独立人类审批入口（经 sudo/Touch ID 调用）
-│   ├── daemon.py                  # opsd：常驻守护进程（Unix Socket 监听、路由与权限检查）
-│   ├── config.py                  # .ssh-servers.env 与 policy.yaml 强校验字面量解析
-│   ├── planner.py                 # 统一 Plan Token 状态机（PENDING -> APPROVED -> CONSUMED）
-│   ├── redactor.py                # 脱敏引擎（凭据 + IP + Secret + 路径）
-│   ├── audit.py                   # JSONL 只追加审计日志
-│   ├── executors/
-│   │   ├── ssh_exec.py            # 统一安全 SSH 子进程封装
-│   │   ├── logs.py                # 日志读取与 Docker 状态
-│   │   ├── docker_ops.py          # Docker 白名单重启与重启后健康检查
-│   │   ├── rsync_ops.py           # rsync 预演、软链扫描、指纹防篡改与熔断
-│   │   └── config_ops.py          # 配置脱敏读取、密文还原、预检、Diff、备份与自动回滚
-│   └── mcp_adapter/               # 可选扩展：50 行薄适配层，供无终端纯对话客户端复用 opsd
-│       └── server.py
+├── src/
+│   ├── lib.rs
+│   ├── bin/
+│   │   ├── opsd.rs                # 守护进程二进制（监听 ops.sock + 0600 admin.sock）
+│   │   ├── opsctl.rs              # 零凭据瘦客户端二进制
+│   │   └── ops-approve.rs         # 人类独立审批工具二进制（连接 admin.sock）
+│   ├── protocol.rs                # Unix Domain Socket NDJSON 通信协议
+│   ├── config.rs                  # opsd.conf / .ssh-servers.env / policy.yaml 强校验解析
+│   ├── planner.rs                 # 统一 Plan Token 状态机（含 zeroize 内存密文清零）
+│   ├── redactor.rs                # 脱敏引擎（凭据 + IP + Secret + 密文占位符还原）
+│   ├── audit.rs                   # 只追加 JSONL 审计日志（0600）
+│   ├── engine.rs                  # 策略路由（client 通道严格拒绝 admin.* 防 AI 自批）
+│   ├── daemon.rs                  # 双 Unix Socket 监听与属组权限管理
+│   └── executors/
+│       ├── ssh_exec.rs            # 直接 execve 的安全 SSH/子进程封装（带超时强杀）
+│       ├── logs.rs                # 日志读取与 Docker 状态
+│       ├── docker_ops.rs          # Docker 白名单两阶段重启与启动日志回传
+│       ├── rsync_ops.rs           # rsync 预演、软链逃逸扫描、TOCTOU 指纹校验与删除熔断
+│       └── config_ops.rs          # 配置脱敏读取、密文还原、语法预检、Diff、备份与回滚
+├── tests/
+│   └── security_and_e2e.rs        # 安全边界单测 + 真实编译二进制双 Socket 端到端测试
 ├── remote/                        # 部署到生产服务器的门控脚本
 │   ├── ai-ops-gate.sh             # 服务端 sudoers 白名单门控脚本
 │   └── ai-ops-ssh-entry.sh        # authorized_keys ForceCommand 入口
 └── deploy/
-    ├── com.local.safe-server-opsd.plist  # macOS launchd 守护进程配置（以 sshops 身份运行）
-    └── policy.example.yaml               # 策略配置模板
+    ├── install.sh                 # 编译并双端隔离安装 3 个原生二进制
+    ├── setup-macos-isolation.sh   # 初始化 /Users/sshops 与共享 Socket/Staging 目录
+    ├── com.local.safe-server-opsd.plist  # macOS launchd 守护进程配置（以 sshops 运行）
+    ├── opsd.example.conf          # opsd.conf 主配置模板
+    ├── ssh-servers.example.env    # 服务器凭据模板
+    └── policy.example.yaml        # 策略配置模板
 ```
 
 ---
@@ -386,7 +398,7 @@ safe-server-ops-skill/
    * 落地 `capabilities`、`logs`、`docker status` 以及初版 `skill/SKILL.md`；
    * 验证：任意报错与输出绝不泄漏 `HOST` / `USER` / `KEY_FILE` / IP，且日常非运维会话上下文几乎零占用。
 2. **Phase 2：统一审批状态机 + `rsync` 两阶段安全同步**
-   * 落地 `planner.py` 与防 AI 自批的 `ops-approve`（`sudo`/Touch ID）；
+   * 落地 `planner.rs` 与防 AI 自批的 `ops-approve`（`sudo`/Touch ID）；
    * 落地 `rsync preview` / `rsync apply`（软链扫描 + Manifest 指纹校验 + `--delete` 熔断）；
    * 在生产机配置 `rrsync` 专用 Key 并完成发布演练。
 3. **Phase 3：Docker 重启与配置修改闭环**
@@ -394,4 +406,4 @@ safe-server-ops-skill/
    * 落地 `config read/plan/apply/rollback` 及生产机 `ai-ops-gate.sh` 语法校验、自动备份与重载失败自动回滚。
 4. **Phase 4：OS 级真隔离上线**
    * 创建本机独立用户 `sshops`、Staging 中转目录与 `launchd` 服务；
-   * 验证日常用户执行 `cat /var/lib/sshops/.ssh-servers.env` 返回 `Permission denied`、AI 无法自行调用 `ops-approve`，完成全链路安全验收。
+   * 验证日常用户执行 `cat /Users/sshops/.local/config/opsd/.ssh-servers.env` 返回 `Permission denied`、AI 无法自行调用 `ops-approve`，完成全链路安全验收。

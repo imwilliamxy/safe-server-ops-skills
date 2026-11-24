@@ -1,6 +1,6 @@
-# `safe-server-ops-skill` 详细部署与安装指南（macOS 隔离版）
+# `safe-server-ops-skill` 详细部署与安装指南（v0.2.0 Rust 单二进制 / macOS 隔离版）
 
-本文档提供从零搭建 **OS 级凭据隔离（`sshops` 独立用户）+ 生产服务器纵深防御 + 渐进式 Skill** 的完整可复制操作步骤。
+本文档提供从零搭建 **零运行时依赖（Rust 原生单文件二进制）+ OS 级凭据隔离（`sshops` 独立用户）+ 生产服务器纵深防御 + 渐进式 Skill** 的完整可复制操作步骤。
 
 > **约定**：下文命令中的 `<username>` 请替换为你本机日常登录的 macOS 用户名（例如 `john`）。  
 > 为保障系统安全，所有涉及 `sudo` 的步骤均需由你本人在终端执行。
@@ -9,8 +9,9 @@
 
 ## 前置条件
 
-* 本机（macOS）：已安装 Rust 工具链（`cargo`，仅编译构建时需要；运行时**零 Python / 零外部运行时依赖**）、OpenSSH、`rsync`。
-* 生产服务器（Linux）：拥有 `sudo` / `root` 权限用于创建受限运维账号 `ai-ops` 与安装门控脚本。
+* **运行期（目标 Mac 宿主机）**：**无需安装 Python、无需 `uv`、无需虚拟环境、也无需 Rust**；仅需 macOS 自带的 `ssh` 与 `rsync`。
+* **编译期（仅源码构建机器需要）**：已安装 Rust 工具链（`cargo` / `rustc`）。若把编好的 3 个单文件二进制拷贝到其他同架构 Mac，目标机可直接按下方「方式 B」零依赖安装。
+* **生产服务器（Linux）**：拥有 `sudo` / `root` 权限用于创建受限运维账号 `ai-ops` 与安装门控脚本。
 
 ### 安装完成后的最终目录与权限布局
 
@@ -83,20 +84,37 @@ sudo ./deploy/setup-macos-isolation.sh <username>
 
 ---
 
-### 第 3 步：编译并双端隔离安装 `opsd` / `ops-approve` / `opsctl`
+### 第 3 步：安装 3 个原生单文件二进制（`opsd` / `ops-approve` / `opsctl`）
 
-先编译 Release 二进制，再运行安装脚本 [deploy/install.sh](deploy/install.sh)：
+#### 方式 A：本机有 Rust 工具链（源码编译 + 自动安装，推荐）
 
 ```bash
+cd /path/to/safe-server-ops-skill
 cargo build --release
 sudo ./deploy/install.sh <username>
 ```
 
-脚本会自动：
-1. 将单文件二进制 `opsd` 与 `ops-approve` 安装至 `/Users/sshops/.local/bin/`（属主 `sshops`，权限 `700`，日常账号与 AI 无法读取或覆盖）；
-2. 将零凭据单文件客户端 `opsctl` 安装至 `/Users/<username>/.local/bin/opsctl`（权限 `755`）。
+脚本会自动将 `target/release/` 下的 3 个单文件二进制安装到隔离位置：
+1. `/Users/sshops/.local/bin/opsd` 与 `/Users/sshops/.local/bin/ops-approve`（属主 `sshops:opsclients`，权限 `700`，日常账号与 AI 无法读取或覆盖）；
+2. `/Users/<username>/.local/bin/opsctl`（属主 `<username>`，权限 `755`，零凭据）。
 
-完全不依赖 Python 或虚拟环境。请确认 `/Users/<username>/.local/bin` 已在你的 `PATH` 中（如未加入，在 `~/.zshrc` 中添加 `export PATH="$HOME/.local/bin:$PATH"`）。
+#### 方式 B：目标 Mac 无 Rust 工具链（直接拷贝预编译二进制）
+
+若已在另一台同架构 Mac 编译好 `opsd`、`ops-approve`、`opsctl` 三个文件，无需安装任何开发工具链，直接按权限拷入即可：
+
+```bash
+sudo install -m 700 -o sshops -g opsclients ./opsd        /Users/sshops/.local/bin/opsd
+sudo install -m 700 -o sshops -g opsclients ./ops-approve /Users/sshops/.local/bin/ops-approve
+install -d -m 755 /Users/<username>/.local/bin
+install -m 755 ./opsctl /Users/<username>/.local/bin/opsctl
+```
+
+安装完成后快速核验二进制可执行性（并确认 `/Users/<username>/.local/bin` 已在你的 `PATH` 中）：
+
+```bash
+opsctl --help
+sudo -u sshops /Users/sshops/.local/bin/opsd --help
+```
 
 ---
 
