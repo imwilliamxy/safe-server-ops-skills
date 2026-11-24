@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
+use crate::session::ClientMeta;
+
 pub const DEFAULT_SOCKET_PATH: &str = "/var/run/sshops/ops.sock";
 pub const DEFAULT_ADMIN_SOCKET_PATH: &str = "/var/run/sshops/admin.sock";
 pub const MAX_MESSAGE_BYTES: usize = 4 * 1024 * 1024; // 4 MiB
@@ -84,6 +86,16 @@ pub fn send_request(
     params: Value,
     timeout_secs: u64,
 ) -> Result<Value, String> {
+    send_request_with_meta(socket_path, method, params, None, timeout_secs)
+}
+
+pub fn send_request_with_meta(
+    socket_path: &Path,
+    method: &str,
+    params: Value,
+    meta: Option<&ClientMeta>,
+    timeout_secs: u64,
+) -> Result<Value, String> {
     if !socket_path.exists() {
         return Err(format!(
             "Socket not found at '{}'. Is opsd running?",
@@ -101,10 +113,15 @@ pub fn send_request(
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
 
-    let req = json!({
+    let mut req = json!({
         "method": method,
         "params": params,
     });
+    if let Some(m) = meta {
+        if let Ok(mv) = serde_json::to_value(m) {
+            req["meta"] = mv;
+        }
+    }
     write_json_line(&mut stream, &req)?;
     read_json_line(&stream, MAX_MESSAGE_BYTES)
 }

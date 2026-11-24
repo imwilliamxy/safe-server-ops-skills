@@ -3,15 +3,20 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::net::SocketAddr;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
 use serde::Deserialize;
 
+use crate::audit::{
+    DEFAULT_AUDIT_MAX_BYTES, DEFAULT_AUDIT_MAX_FILES, DEFAULT_AUDIT_OUTPUT_MAX_BYTES,
+};
 use crate::protocol::{DEFAULT_ADMIN_SOCKET_PATH, DEFAULT_SOCKET_PATH};
 
 pub const DEFAULT_DAEMON_CONFIG_REL: &str = ".local/config/opsd/opsd.conf";
+pub const DEFAULT_WEB_LISTEN_ADDR: &str = "127.0.0.1:10100";
 
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -22,6 +27,24 @@ pub struct DaemonConfig {
     pub audit_log: PathBuf,
     pub socket_group: Option<String>,
     pub check_ownership: bool,
+    pub web_listen: Option<String>,
+    pub audit_max_bytes: u64,
+    pub audit_max_files: usize,
+    pub audit_output_max_bytes: usize,
+}
+
+/// Validate that the web server bind address is strictly loopback (e.g. 127.0.0.1:10100 or [::1]:10100).
+pub fn validate_loopback_listen_addr(raw: &str) -> Result<SocketAddr, String> {
+    let trimmed = raw.trim();
+    let addr: SocketAddr = trimmed.parse().map_err(|e| {
+        format!("Invalid web_listen address '{trimmed}' (expected host:port like 127.0.0.1:10100): {e}")
+    })?;
+    if !addr.ip().is_loopback() {
+        return Err(format!(
+            "Refusing non-loopback web_listen address '{trimmed}'. Only loopback addresses (127.0.0.1 / [::1]) are permitted."
+        ));
+    }
+    Ok(addr)
 }
 
 #[derive(Debug, Clone)]
@@ -294,6 +317,10 @@ pub fn load_daemon_config(
         "audit_log",
         "socket_group",
         "check_ownership",
+        "web_listen",
+        "audit_max_bytes",
+        "audit_max_files",
+        "audit_output_max_bytes",
     ];
     let mut fields: HashMap<String, String> = HashMap::new();
 
@@ -350,6 +377,43 @@ pub fn load_daemon_config(
         None => false,
     };
 
+    let web_listen = match fields.get("web_listen") {
+        None => Some(DEFAULT_WEB_LISTEN_ADDR.to_string()),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty()
+                || matches!(
+                    trimmed.to_ascii_lowercase().as_str(),
+                    "off" | "none" | "false" | "disabled"
+                )
+            {
+                None
+            } else {
+                validate_loopback_listen_addr(trimmed)?;
+                Some(trimmed.to_string())
+            }
+        }
+    };
+
+    let audit_max_bytes = match fields.get("audit_max_bytes") {
+        Some(raw) => raw.trim().parse::<u64>().map_err(|_| {
+            format!("Invalid integer for 'audit_max_bytes' in opsd.conf: {raw:?}")
+        })?,
+        None => DEFAULT_AUDIT_MAX_BYTES,
+    };
+    let audit_max_files = match fields.get("audit_max_files") {
+        Some(raw) => raw.trim().parse::<usize>().map_err(|_| {
+            format!("Invalid integer for 'audit_max_files' in opsd.conf: {raw:?}")
+        })?,
+        None => DEFAULT_AUDIT_MAX_FILES,
+    };
+    let audit_output_max_bytes = match fields.get("audit_output_max_bytes") {
+        Some(raw) => raw.trim().parse::<usize>().map_err(|_| {
+            format!("Invalid integer for 'audit_output_max_bytes' in opsd.conf: {raw:?}")
+        })?,
+        None => DEFAULT_AUDIT_OUTPUT_MAX_BYTES,
+    };
+
     Ok(DaemonConfig {
         servers_env: expand_path(servers_env_raw, base_dir)?,
         policy: expand_path(policy_raw, base_dir)?,
@@ -358,6 +422,10 @@ pub fn load_daemon_config(
         audit_log: expand_path(audit_raw, base_dir)?,
         socket_group,
         check_ownership: check_own,
+        web_listen,
+        audit_max_bytes,
+        audit_max_files,
+        audit_output_max_bytes,
     })
 }
 

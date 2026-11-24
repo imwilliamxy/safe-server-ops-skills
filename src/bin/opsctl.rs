@@ -7,7 +7,8 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use serde_json::{json, Value};
 
-use safe_server_ops::protocol::{resolve_socket_path, send_request};
+use safe_server_ops::protocol::{resolve_socket_path, send_request_with_meta};
+use safe_server_ops::session::detect_client_meta;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -22,6 +23,18 @@ struct Cli {
     /// Output raw JSON response
     #[arg(long = "json", global = true)]
     as_json: bool,
+
+    /// Optional human-readable task/session title for audit dashboard grouping
+    #[arg(long = "session-title", global = true)]
+    session_title: Option<String>,
+
+    /// Optional explicit session ID override (defaults to auto-detected Paseo/Agent session)
+    #[arg(long = "session-id", global = true)]
+    session_id: Option<String>,
+
+    /// Optional agent name override (e.g. antigravity, claude-code, codex)
+    #[arg(long = "agent", global = true)]
+    agent: Option<String>,
 
     #[command(subcommand)]
     command: Commands,
@@ -208,6 +221,16 @@ fn print_result(resp: &Value, as_json: bool) -> ExitCode {
         println!("  server     : {}", data["server"].as_str().unwrap_or(""));
         println!("  target     : {}", data["target"].as_str().unwrap_or(""));
         println!("  summary    : {}", data["summary"].as_str().unwrap_or(""));
+        if let Some(warns) = data.get("risk_warnings").and_then(Value::as_array) {
+            if !warns.is_empty() {
+                println!("\n  !! RISK WARNINGS !!");
+                for w in warns {
+                    if let Some(txt) = w.as_str() {
+                        println!("    - {txt}");
+                    }
+                }
+            }
+        }
         if let Some(diff) = data.get("diff").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             println!("\n--- diff / changes ---\n{diff}");
         }
@@ -358,7 +381,13 @@ fn main() -> ExitCode {
         },
     };
 
-    match send_request(&sock, method, params, 120) {
+    let meta = detect_client_meta(
+        cli.session_id.as_deref(),
+        cli.session_title.as_deref(),
+        cli.agent.as_deref(),
+    );
+
+    match send_request_with_meta(&sock, method, params, Some(&meta), 120) {
         Ok(resp) => print_result(&resp, cli.as_json),
         Err(e) => {
             eprintln!("ERROR: {e}");

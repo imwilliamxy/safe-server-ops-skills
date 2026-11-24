@@ -1,6 +1,7 @@
-//! Two-phase approval state machine with zeroized secret config storage.
+//! Two-phase approval state machine with zeroized secret config storage,
+//! session attribution, and risk warning tracking.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -96,6 +97,12 @@ pub struct Plan {
     pub status: PlanStatus,
     pub approved_by: Option<String>,
     pub approved_at: Option<u64>,
+    pub risk_warnings: Vec<String>,
+    pub session_id: Option<String>,
+    pub session_title: Option<String>,
+    pub agent: Option<String>,
+    pub host_app: Option<String>,
+    pub remote_command: Option<String>,
 }
 
 fn now_epoch_secs() -> u64 {
@@ -130,6 +137,7 @@ impl Plan {
             "reason": self.reason,
             "summary": self.summary,
             "status": eff_status.as_str(),
+            "created_at": self.created_at,
             "expires_in_seconds": self.expires_at.saturating_sub(now),
         });
         if let Some(ref by) = self.approved_by {
@@ -138,21 +146,50 @@ impl Plan {
         if include_diff && !self.diff.is_empty() {
             obj["diff"] = Value::String(self.diff.clone());
         }
+        if !self.risk_warnings.is_empty() {
+            obj["risk_warnings"] = json!(self.risk_warnings);
+        }
+        if let Some(ref sid) = self.session_id {
+            obj["session_id"] = Value::String(sid.clone());
+        }
+        if let Some(ref title) = self.session_title {
+            obj["session_title"] = Value::String(title.clone());
+        }
+        if let Some(ref a) = self.agent {
+            obj["agent"] = Value::String(a.clone());
+        }
+        if let Some(ref h) = self.host_app {
+            obj["host_app"] = Value::String(h.clone());
+        }
+        if let Some(ref cmd) = self.remote_command {
+            obj["remote_command"] = Value::String(cmd.clone());
+        }
         obj
     }
 }
 
-pub struct PlanStore {
+struct PlanStoreInner {
     ttl_seconds: u64,
-    plans: Mutex<HashMap<String, Plan>>,
+    plans: HashMap<String, Plan>,
+}
+
+pub struct PlanStore {
+    inner: Mutex<PlanStoreInner>,
 }
 
 impl PlanStore {
     pub fn new(ttl_seconds: u64) -> Self {
         Self {
-            ttl_seconds,
-            plans: Mutex::new(HashMap::new()),
+            inner: Mutex::new(PlanStoreInner {
+                ttl_seconds,
+                plans: HashMap::new(),
+            }),
         }
+    }
+
+    pub fn set_ttl_seconds(&self, ttl_seconds: u64) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        guard.ttl_seconds = ttl_seconds;
     }
 
     fn generate_token() -> Result<String, String> {
@@ -180,9 +217,35 @@ impl PlanStore {
         diff: String,
         payload: PlanPayload,
     ) -> Result<Plan, String> {
+        self.create_with_details(
+            server,
+            target,
+            reason,
+            summary,
+            diff,
+            payload,
+            Vec::new(),
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_with_details(
+        &self,
+        server: String,
+        target: String,
+        reason: String,
+        summary: String,
+        diff: String,
+        payload: PlanPayload,
+        risk_warnings: Vec<String>,
+        remote_command: Option<String>,
+    ) -> Result<Plan, String> {
         let now = now_epoch_secs();
         let token = Self::generate_token()?;
         let kind = payload.kind().to_string();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let ttl = guard.ttl_seconds;
         let plan = Plan {
             token: token.clone(),
             kind,
@@ -193,40 +256,102 @@ impl PlanStore {
             diff,
             payload,
             created_at: now,
-            expires_at: now.saturating_add(self.ttl_seconds),
+            expires_at: now.saturating_add(ttl),
             status: PlanStatus::PendingApproval,
             approved_by: None,
             approved_at: None,
+            risk_warnings,
+            session_id: None,
+            session_title: None,
+            agent: None,
+            host_app: None,
+            remote_command,
         };
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-        Self::prune_locked(&mut guard, now);
-        guard.insert(token, plan.clone());
+        Self::prune_locked(&mut guard.plans, now);
+        guard.plans.insert(token, plan.clone());
         Ok(plan)
     }
 
+    pub fn attach_session_meta(
+        &self,
+        token: &str,
+        session_id: Option<String>,
+        session_title: Option<String>,
+        agent: Option<String>,
+        host_app: Option<String>,
+    ) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(plan) = guard.plans.get_mut(token) {
+            plan.session_id = session_id;
+            plan.session_title = session_title;
+            plan.agent = agent;
+            plan.host_app = host_app;
+        }
+    }
+
     pub fn list_pending(&self) -> Vec<Value> {
+        self.list_pending_with_diff(false)
+    }
+
+    pub fn list_pending_with_diff(&self, include_diff: bool) -> Vec<Value> {
         let now = now_epoch_secs();
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-        Self::prune_locked(&mut guard, now);
-        guard
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::prune_locked(&mut guard.plans, now);
+        let mut items: Vec<(u64, Value)> = guard
+            .plans
             .values()
             .filter(|p| p.status == PlanStatus::PendingApproval && !p.is_expired(now))
-            .map(|p| p.to_public_json(false))
-            .collect()
+            .map(|p| (p.created_at, p.to_public_json(include_diff)))
+            .collect();
+        items.sort_by(|a, b| b.0.cmp(&a.0));
+        items.into_iter().map(|(_, v)| v).collect()
+    }
+
+    pub fn pending_counts_by_session(&self) -> BTreeMap<String, usize> {
+        let now = now_epoch_secs();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::prune_locked(&mut guard.plans, now);
+        let mut counts = BTreeMap::new();
+        for p in guard.plans.values() {
+            if p.status == PlanStatus::PendingApproval && !p.is_expired(now) {
+                if let Some(sid) = p.session_id.as_deref().filter(|s| !s.is_empty()) {
+                    *counts.entry(sid.to_string()).or_insert(0) += 1;
+                }
+            }
+        }
+        counts
+    }
+
+    pub fn pending_count(&self) -> usize {
+        let now = now_epoch_secs();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        Self::prune_locked(&mut guard.plans, now);
+        guard
+            .plans
+            .values()
+            .filter(|p| p.status == PlanStatus::PendingApproval && !p.is_expired(now))
+            .count()
     }
 
     pub fn get_public(&self, token: &str, include_diff: bool) -> Result<Value, String> {
-        let guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let plan = guard
+            .plans
             .get(token)
             .ok_or_else(|| format!("Unknown plan token: {token}"))?;
         Ok(plan.to_public_json(include_diff))
     }
 
     pub fn approve(&self, token: &str, approved_by: &str) -> Result<Value, String> {
+        self.approve_plan(token, approved_by)
+            .map(|p| p.to_public_json(false))
+    }
+
+    pub fn approve_plan(&self, token: &str, approved_by: &str) -> Result<Plan, String> {
         let now = now_epoch_secs();
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let plan = guard
+            .plans
             .get_mut(token)
             .ok_or_else(|| format!("Unknown plan token: {token}"))?;
         if plan.is_expired(now) {
@@ -242,12 +367,18 @@ impl PlanStore {
         plan.status = PlanStatus::Approved;
         plan.approved_by = Some(approved_by.to_string());
         plan.approved_at = Some(now);
-        Ok(plan.to_public_json(false))
+        Ok(plan.clone())
     }
 
     pub fn reject(&self, token: &str, rejected_by: &str) -> Result<Value, String> {
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        self.reject_plan(token, rejected_by)
+            .map(|p| p.to_public_json(false))
+    }
+
+    pub fn reject_plan(&self, token: &str, rejected_by: &str) -> Result<Plan, String> {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let plan = guard
+            .plans
             .get_mut(token)
             .ok_or_else(|| format!("Unknown plan token: {token}"))?;
         if !matches!(
@@ -261,13 +392,14 @@ impl PlanStore {
         }
         plan.status = PlanStatus::Rejected;
         plan.approved_by = Some(format!("rejected:{rejected_by}"));
-        Ok(plan.to_public_json(false))
+        Ok(plan.clone())
     }
 
     pub fn consume_approved(&self, token: &str, expected_kind: &str) -> Result<Plan, String> {
         let now = now_epoch_secs();
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let plan = guard
+            .plans
             .get_mut(token)
             .ok_or_else(|| format!("Unknown plan token: {token}"))?;
         if plan.kind != expected_kind {
@@ -303,8 +435,8 @@ impl PlanStore {
 
     /// Test helper: force a plan's expiration timestamp into the past.
     pub fn expire_for_test(&self, token: &str) {
-        let mut guard = self.plans.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(p) = guard.get_mut(token) {
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(p) = guard.plans.get_mut(token) {
             p.expires_at = 0;
         }
     }

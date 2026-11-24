@@ -1,4 +1,4 @@
-//! ops-approve binary: Human-only approval CLI communicating over admin.sock (0600).
+//! ops-approve binary: Human-only approval & admin reload CLI communicating over admin.sock (0600).
 
 use std::env;
 use std::process::ExitCode;
@@ -11,7 +11,7 @@ use safe_server_ops::protocol::{resolve_admin_socket_path, send_request};
 #[derive(Parser, Debug)]
 #[command(
     name = "ops-approve",
-    about = "Human-only approval tool for opsd (connects to 0600 admin.sock)."
+    about = "Human-only approval and admin reload tool for opsd (connects to 0600 admin.sock)."
 )]
 struct Args {
     /// Path to opsd admin Unix socket (or OPS_ADMIN_SOCKET)
@@ -23,20 +23,24 @@ struct Args {
     as_json: bool,
 
     /// List pending plans
-    #[arg(long, conflicts_with_all = ["show", "approve", "reject"])]
+    #[arg(long, conflicts_with_all = ["show", "approve", "reject", "reload"])]
     list: bool,
 
     /// Inspect full plan summary and diff
-    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "approve", "reject"])]
+    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "approve", "reject", "reload"])]
     show: Option<String>,
 
     /// Approve a pending plan token
-    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "show", "reject"])]
+    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "show", "reject", "reload"])]
     approve: Option<String>,
 
     /// Reject a pending plan token
-    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "show", "approve"])]
+    #[arg(long, value_name = "PLAN_TOKEN", conflicts_with_all = ["list", "show", "approve", "reload"])]
     reject: Option<String>,
+
+    /// Hot-reload .ssh-servers.env and policy.yaml without restarting opsd
+    #[arg(long, conflicts_with_all = ["list", "show", "approve", "reject"])]
+    reload: bool,
 }
 
 fn detect_actor() -> String {
@@ -69,11 +73,24 @@ fn normalize_shorthand_args() -> Vec<String> {
             continue;
         }
         match tok.as_str() {
-            "approve" | "reject" | "show" => out.push(format!("--{tok}")),
+            "approve" | "reject" | "show" | "list" | "reload" => out.push(format!("--{tok}")),
             _ => out.push(tok),
         }
     }
     out
+}
+
+fn print_warnings(obj: &Value) {
+    if let Some(warns) = obj.get("risk_warnings").and_then(Value::as_array) {
+        if !warns.is_empty() {
+            println!("  !! RISK WARNINGS !!");
+            for w in warns {
+                if let Some(s) = w.as_str() {
+                    println!("    - {s}");
+                }
+            }
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -95,8 +112,10 @@ fn main() -> ExitCode {
             "admin.reject",
             json!({ "plan_token": tok, "actor": actor }),
         )
+    } else if args.reload {
+        ("admin.reload", json!({ "actor": actor }))
     } else {
-        eprintln!("ERROR: Specify one of --list, --show <TOKEN>, approve <TOKEN>, or reject <TOKEN>.");
+        eprintln!("ERROR: Specify one of --list, --show <TOKEN>, approve <TOKEN>, reject <TOKEN>, or reload.");
         return ExitCode::from(2);
     };
 
@@ -152,6 +171,14 @@ fn main() -> ExitCode {
                 p["reason"].as_str().unwrap_or(""),
                 p["summary"].as_str().unwrap_or(""),
             );
+            if let Some(st) = p.get("session_title").and_then(Value::as_str) {
+                println!(
+                    "  session: {} ({})",
+                    st,
+                    p.get("agent").and_then(Value::as_str).unwrap_or("unknown")
+                );
+            }
+            print_warnings(&p);
         }
         return ExitCode::SUCCESS;
     }
@@ -168,9 +195,30 @@ fn main() -> ExitCode {
         println!("target     : {}", data["target"].as_str().unwrap_or(""));
         println!("reason     : {}", data["reason"].as_str().unwrap_or(""));
         println!("summary    : {}", data["summary"].as_str().unwrap_or(""));
+        if let Some(sid) = data.get("session_id").and_then(Value::as_str) {
+            println!(
+                "session    : {} (title={}, agent={})",
+                sid,
+                data.get("session_title").and_then(Value::as_str).unwrap_or("-"),
+                data.get("agent").and_then(Value::as_str).unwrap_or("-"),
+            );
+        }
+        print_warnings(data);
         if let Some(diff) = data.get("diff").and_then(Value::as_str).filter(|s| !s.is_empty()) {
             println!("\n--- diff / changes ---\n{diff}");
         }
+        return ExitCode::SUCCESS;
+    }
+
+    if args.reload {
+        println!(
+            "Configuration hot-reloaded (servers={}, restricted={}, allow_unlisted={}, gate_mode={}, plan_ttl={}s)",
+            data["server_count"].as_u64().unwrap_or(0),
+            data["restricted_servers"].as_u64().unwrap_or(0),
+            data["allow_unlisted_servers"].as_bool().unwrap_or(false),
+            data["gate_mode"].as_bool().unwrap_or(true),
+            data["plan_ttl_seconds"].as_u64().unwrap_or(180),
+        );
         return ExitCode::SUCCESS;
     }
 

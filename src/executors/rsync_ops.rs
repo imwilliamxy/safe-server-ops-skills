@@ -16,6 +16,7 @@ use crate::executors::logs::{resolve_server_access, ServerAccess};
 use crate::executors::ssh_exec::{CommandResult, SSHExecutor};
 use crate::planner::{PlanPayload, PlanStore};
 use crate::redactor::{truncate_output, Redactor};
+use crate::risk::assess_rsync_risk;
 
 /// Simple wildcard matcher supporting '*' and '?' (compatible with basic rsync/fnmatch patterns).
 fn glob_match(text: &str, pattern: &str) -> bool {
@@ -483,7 +484,10 @@ fn preview_with_spec(
         16384,
     );
 
-    let plan = planner.create(
+    let risk_warnings = assess_rsync_risk(spec.allow_delete, deleted_count);
+    let remote_desc = format!("rsync {} {} ({})", spec.direction, spec.label, spec.server);
+
+    let plan = planner.create_with_details(
         spec.server.clone(),
         spec.label.clone(),
         format!("rsync {} {}", spec.direction, spec.label),
@@ -504,6 +508,8 @@ fn preview_with_spec(
             local_total_bytes,
             exclude_patterns: patterns,
         },
+        risk_warnings,
+        Some(remote_desc),
     )?;
 
     let mut out = plan.to_public_json(true);

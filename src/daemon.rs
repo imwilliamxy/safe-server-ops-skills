@@ -16,6 +16,7 @@ use serde_json::{json, Value};
 
 use crate::engine::OpsEngine;
 use crate::protocol::{read_json_line, write_json_line, MAX_MESSAGE_BYTES};
+use crate::session::{extract_peer_cred, ClientMeta};
 
 fn chown_socket_group(path: &Path, group_name: &str) -> Result<(), String> {
     let c_group = CString::new(group_name)
@@ -73,16 +74,21 @@ fn handle_connection(mut stream: UnixStream, engine: Arc<OpsEngine>, is_admin: b
     let _ = stream.set_read_timeout(timeout);
     let _ = stream.set_write_timeout(timeout);
 
+    let peer = extract_peer_cred(&stream);
+
     let resp = match read_json_line(&stream, MAX_MESSAGE_BYTES) {
         Ok(req) => {
             let method = req.get("method").and_then(Value::as_str).unwrap_or("");
             let params = req.get("params").cloned().unwrap_or_else(|| json!({}));
+            let meta: Option<ClientMeta> = req
+                .get("meta")
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
             if !params.is_object() {
                 json!({ "ok": false, "error": "'params' must be a JSON object." })
             } else if is_admin {
-                engine.handle_admin_request(method, &params)
+                engine.handle_admin_request_with_peer(method, &params, peer)
             } else {
-                engine.handle_client_request(method, &params)
+                engine.handle_client_request_with_context(method, &params, meta.as_ref(), peer)
             }
         }
         Err(err) => json!({ "ok": false, "error": err }),

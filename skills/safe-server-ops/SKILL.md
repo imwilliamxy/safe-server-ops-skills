@@ -13,6 +13,7 @@ You operate production servers **exclusively** through the credential-less CLI `
 2. **Use logical IDs only**: Always start by discovering allowed server aliases, log IDs, Docker targets, config IDs, and sync targets via `opsctl capabilities`. Never ask the user for server IPs, usernames, or private keys.
 3. **Never self-approve**: All mutating operations (Docker restart, `rsync apply`, config changes, rollbacks) require a two-phase flow (`plan/preview` → human out-of-band approval via `ops-approve` → `apply`). You cannot and must not attempt to bypass approval.
 4. **Respect redacted placeholders**: Responses are automatically redacted (`[REDACTED_HOST]`, `[REDACTED_IP]`, `{{REDACTED_SECRET_N}}`). Keep `{{REDACTED_SECRET_N}}` intact when editing configs; never attempt to extract or replace hidden secrets.
+5. **Tag your session for audit visibility**: When calling `opsctl`, pass a concise `--session-title "<short task summary>"` (e.g. `opsctl --session-title "排查通知服务日志" logs ...`) so the read-only audit dashboard groups and labels this conversation clearly alongside the auto-detected session ID.
 
 ## Progressive Reference Loading
 

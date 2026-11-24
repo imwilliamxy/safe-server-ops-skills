@@ -18,6 +18,10 @@ Credential-isolated production server operations gateway (**Progressive Skill + 
   * **L1 Docker 重启**：两阶段 `restart-plan` → 人类审批 → `restart-apply`（自动带回重启后状态与最近 30 行脱敏启动日志）。
   * **L2 `rsync` 同步**：软链逃逸扫描、文件数/体积限制、`--dry-run` 预演、Manifest SHA256 防篡改（TOCTOU）、`--delete` 熔断、兼容服务端 `rrsync`。
   * **L2 配置修改与回滚**：密文占位符脱敏读取、占位符防篡改还原、并发乐观锁（`base_sha256`）、本地 JSON/YAML + 远端校验器（如 `nginx -t`）预检、Unified Diff、自动备份与重载失败自动回滚。
+* **内嵌只读 Web 审计监控台（默认 `http://127.0.0.1:10100`）**：
+  * 仅绑定本机回环地址且全接口严格只读（拒绝非 `GET/HEAD`，防止 AI 通过 HTTP 自批）；
+  * 左侧按 **Agent Session** 聚合（自动识别 Paseo 多对话 `PASEO_AGENT_ID`、Antigravity、Claude Code、Codex、终端会话，并支持 `--session-title` 语义标题），右侧实时（SSE）展示近期 100 条命令调用、具体远端命令、脱敏输出、Diff、审批链路与高危命令风险标红；
+  * 支持审计日志按大小自动轮转（默认 `20 MiB` 保留 5 份）及 `ops-approve reload` / `SIGHUP` 配置零中断热重载。
 
 ## 快速本地构建与测试
 

@@ -9,6 +9,7 @@ use crate::executors::logs::{resolve_server_access, ServerAccess};
 use crate::executors::ssh_exec::SSHExecutor;
 use crate::planner::{PlanPayload, PlanStore};
 use crate::redactor::{truncate_output, Redactor};
+use crate::risk::assess_command_risk;
 
 pub fn exec_plan(
     policy: &OpsPolicy,
@@ -50,11 +51,14 @@ pub fn exec_plan(
         return Err("A non-empty --reason is required for custom command execution.".to_string());
     }
 
-    let safe_cmd_preview = redactor.redact(clean_cmd, None, &[]);
-    let summary = format!("Execute custom command on '{server}' (requires human approval)");
+    let sprof = profiles.get(server);
+    let safe_cmd_preview = redactor.redact(clean_cmd, sprof, &[]);
+    let risk_warnings = assess_command_risk(clean_cmd);
+    let short_cmd: String = safe_cmd_preview.chars().take(120).collect();
+    let summary = format!("Execute custom command on '{server}': {short_cmd}");
     let diff = format!("$ {safe_cmd_preview}");
 
-    let plan = planner.create(
+    let plan = planner.create_with_details(
         server.to_string(),
         "custom_exec".to_string(),
         clean_reason.to_string(),
@@ -64,9 +68,13 @@ pub fn exec_plan(
             server: server.to_string(),
             command: clean_cmd.to_string(),
         },
+        risk_warnings,
+        Some(safe_cmd_preview.clone()),
     )?;
 
-    Ok(plan.to_public_json(true))
+    let mut out = plan.to_public_json(true);
+    out["command"] = Value::String(safe_cmd_preview);
+    Ok(out)
 }
 
 pub fn exec_apply(
@@ -89,11 +97,17 @@ pub fn exec_apply(
 
     let timeout = policy.global_cfg.default_timeout_seconds.max(30);
     let res = ssh.run_remote_command_string(sprof, &command, None, Some(timeout))?;
+    let safe_cmd = redactor.redact(&command, Some(sprof), &[]);
+    let short_cmd: String = safe_cmd.chars().take(120).collect();
 
-    Ok(json!({
+    let mut out = json!({
         "plan_token": plan.token,
         "approved_by": plan.approved_by,
         "server": server,
+        "target": "custom_exec",
+        "command": safe_cmd,
+        "remote_command": safe_cmd,
+        "summary": format!("Executed custom command on '{server}': {short_cmd}"),
         "exit_code": res.exit_code,
         "timed_out": res.timed_out,
         "stdout": truncate_output(
@@ -104,5 +118,9 @@ pub fn exec_apply(
             &redactor.redact(&res.stderr, Some(sprof), &[]),
             policy.global_cfg.max_output_bytes.min(16384),
         ),
-    }))
+    });
+    if !plan.risk_warnings.is_empty() {
+        out["risk_warnings"] = json!(plan.risk_warnings);
+    }
+    Ok(out)
 }
