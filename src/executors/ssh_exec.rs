@@ -206,10 +206,24 @@ impl SSHExecutor {
             return Err("Remote command tokens must not be empty.".to_string());
         }
         let remote_cmd = shell_join(remote_tokens);
+        self.run_remote_command_string(profile, &remote_cmd, stdin_data, timeout_secs)
+    }
+
+    /// Execute a human-approved remote shell command string over SSH (local invocation is still direct execve).
+    pub fn run_remote_command_string(
+        &self,
+        profile: &ServerProfile,
+        remote_command: &str,
+        stdin_data: Option<&str>,
+        timeout_secs: Option<u64>,
+    ) -> Result<CommandResult, String> {
+        if remote_command.trim().is_empty() {
+            return Err("Remote command must not be empty.".to_string());
+        }
         let mut argv = self.build_ssh_base_options(profile, false);
         argv.push("--".to_string());
         argv.push(format!("{}@{}", profile.user, profile.host));
-        argv.push(remote_cmd);
+        argv.push(remote_command.to_string());
         let timeout = timeout_secs.unwrap_or(self.global_cfg.default_timeout_seconds);
         Ok(self.runner.run(&argv, stdin_data, timeout))
     }

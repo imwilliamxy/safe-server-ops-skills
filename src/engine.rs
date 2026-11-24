@@ -13,8 +13,9 @@ use crate::executors::config_ops::{
     config_rollback_plan,
 };
 use crate::executors::docker_ops::{docker_restart_apply, docker_restart_plan};
+use crate::executors::exec_ops::{exec_apply, exec_plan};
 use crate::executors::logs::{docker_status, read_logs};
-use crate::executors::rsync_ops::{rsync_apply, rsync_preview};
+use crate::executors::rsync_ops::{rsync_apply, rsync_preview, rsync_preview_dynamic};
 use crate::executors::ssh_exec::{CommandRunner, SSHExecutor};
 use crate::planner::PlanStore;
 use crate::redactor::Redactor;
@@ -98,35 +99,58 @@ impl OpsEngine {
                     }),
                 );
             }
+            let mut sync_map = Map::new();
+            for (tid, tpol) in &spol.sync_targets {
+                sync_map.insert(
+                    tid.clone(),
+                    json!({
+                        "direction": tpol.direction,
+                        "description": tpol.description,
+                        "allow_delete": tpol.allow_delete,
+                        "max_files": tpol.max_files,
+                        "max_size_mb": tpol.max_size_mb,
+                    }),
+                );
+            }
             servers_map.insert(
                 alias.clone(),
                 json!({
+                    "policy_mode": "restricted",
                     "description": spol.description,
+                    "allow_exec": spol.allow_exec,
                     "logs": logs_map,
                     "docker_targets": docker_targets,
                     "configs": cfg_map,
+                    "sync_targets": sync_map,
                 }),
             );
         }
 
-        let mut sync_map = Map::new();
-        for (tid, tpol) in &self.policy.sync_targets {
-            sync_map.insert(
-                tid.clone(),
-                json!({
-                    "server": tpol.server,
-                    "direction": tpol.direction,
-                    "description": tpol.description,
-                    "allow_delete": tpol.allow_delete,
-                    "max_files": tpol.max_files,
-                    "max_size_mb": tpol.max_size_mb,
-                }),
-            );
+        if self.policy.global_cfg.allow_unlisted_servers {
+            for alias in self.profiles.keys() {
+                if servers_map.contains_key(alias) {
+                    continue;
+                }
+                servers_map.insert(
+                    alias.clone(),
+                    json!({
+                        "policy_mode": "default_open",
+                        "description": "Unlisted server inheriting default_open read/write (all mutating actions still require human ops-approve)",
+                        "allow_exec": !self.policy.global_cfg.gate_mode,
+                        "logs": "any safe absolute path or docker:<container>",
+                        "docker_targets": "*",
+                        "configs": "any safe absolute path",
+                        "sync_targets": "dynamic (--local inside unlisted_staging_root, --remote any safe absolute path)",
+                    }),
+                );
+            }
         }
 
         json!({
             "servers": servers_map,
-            "sync_targets": sync_map,
+            "allow_unlisted_servers": self.policy.global_cfg.allow_unlisted_servers,
+            "gate_mode": self.policy.global_cfg.gate_mode,
+            "unlisted_staging_root": self.policy.global_cfg.unlisted_staging_root.display().to_string(),
             "plan_ttl_seconds": self.policy.global_cfg.plan_ttl_seconds,
         })
     }
@@ -209,19 +233,67 @@ impl OpsEngine {
                     )
                 })(),
                 "rsync.preview" => (|| {
-                    let target = req_str(params, "target")?;
-                    rsync_preview(
+                    let server = req_str(params, "server")?;
+                    if let Some(target) = opt_str(params, "target") {
+                        rsync_preview(
+                            &self.policy,
+                            &self.profiles,
+                            &self.ssh,
+                            &self.redactor,
+                            &self.planner,
+                            server,
+                            target,
+                        )
+                    } else {
+                        let local = req_str(params, "local")?;
+                        let remote = req_str(params, "remote")?;
+                        let direction = opt_str(params, "direction").unwrap_or("push");
+                        let allow_delete = params
+                            .get("allow_delete")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        rsync_preview_dynamic(
+                            &self.policy,
+                            &self.profiles,
+                            &self.ssh,
+                            &self.redactor,
+                            &self.planner,
+                            server,
+                            local,
+                            remote,
+                            direction,
+                            allow_delete,
+                        )
+                    }
+                })(),
+                "rsync.apply" => (|| {
+                    let token = req_str(params, "plan_token")?;
+                    rsync_apply(
                         &self.policy,
                         &self.profiles,
                         &self.ssh,
                         &self.redactor,
                         &self.planner,
-                        target,
+                        token,
                     )
                 })(),
-                "rsync.apply" => (|| {
+                "exec.plan" => (|| {
+                    let server = req_str(params, "server")?;
+                    let command = req_str(params, "command")?;
+                    let reason = params.get("reason").and_then(Value::as_str).unwrap_or("");
+                    exec_plan(
+                        &self.policy,
+                        &self.profiles,
+                        &self.redactor,
+                        &self.planner,
+                        server,
+                        command,
+                        reason,
+                    )
+                })(),
+                "exec.apply" => (|| {
                     let token = req_str(params, "plan_token")?;
-                    rsync_apply(
+                    exec_apply(
                         &self.policy,
                         &self.profiles,
                         &self.ssh,

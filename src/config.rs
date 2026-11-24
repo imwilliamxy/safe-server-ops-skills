@@ -90,9 +90,11 @@ pub struct ConfigFilePolicy {
 pub struct ServerPolicy {
     pub alias: String,
     pub description: String,
+    pub allow_exec: bool,
     pub logs: BTreeMap<String, LogSourcePolicy>,
     pub docker: DockerPolicy,
     pub configs: BTreeMap<String, ConfigFilePolicy>,
+    pub sync_targets: BTreeMap<String, SyncTargetPolicy>,
 }
 
 #[derive(Debug, Clone)]
@@ -117,6 +119,8 @@ pub struct GlobalPolicy {
     pub max_output_bytes: usize,
     pub default_timeout_seconds: u64,
     pub gate_mode: bool,
+    pub allow_unlisted_servers: bool,
+    pub unlisted_staging_root: PathBuf,
     pub strict_host_key_checking: String,
     pub known_hosts_file: Option<PathBuf>,
     pub global_excludes: Vec<String>,
@@ -129,6 +133,8 @@ impl Default for GlobalPolicy {
             max_output_bytes: 65536,
             default_timeout_seconds: 20,
             gate_mode: true,
+            allow_unlisted_servers: false,
+            unlisted_staging_root: PathBuf::from("/var/tmp/sshops-staging"),
             strict_host_key_checking: "yes".to_string(),
             known_hosts_file: None,
             global_excludes: default_global_excludes(),
@@ -152,7 +158,6 @@ pub fn default_global_excludes() -> Vec<String> {
 pub struct OpsPolicy {
     pub global_cfg: GlobalPolicy,
     pub servers: BTreeMap<String, ServerPolicy>,
-    pub sync_targets: BTreeMap<String, SyncTargetPolicy>,
 }
 
 pub fn home_dir() -> Result<PathBuf, String> {
@@ -224,7 +229,7 @@ fn validate_alias(val: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_id(val: &str, label: &str) -> Result<(), String> {
+pub fn validate_id(val: &str, label: &str) -> Result<(), String> {
     let re = Regex::new(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$").unwrap();
     if !re.is_match(val) {
         return Err(format!("Invalid {label}: {val:?}"));
@@ -232,7 +237,7 @@ fn validate_id(val: &str, label: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn validate_abs_posix(val: &str, label: &str) -> Result<String, String> {
+pub fn validate_abs_posix(val: &str, label: &str) -> Result<String, String> {
     if !val.starts_with('/') {
         return Err(format!("{label} must be an absolute path: {val:?}"));
     }
@@ -242,6 +247,35 @@ fn validate_abs_posix(val: &str, label: &str) -> Result<String, String> {
         }
     }
     Ok(val.to_string())
+}
+
+/// Block reading or overwriting ultra-sensitive system/credential paths in default_open mode.
+pub fn check_not_sensitive_system_path(abs_path: &str) -> Result<(), String> {
+    let low = abs_path.to_ascii_lowercase();
+    let blocked_exact = [
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/sudoers",
+        "/etc/master.passwd",
+    ];
+    if blocked_exact.iter().any(|&p| low == p) {
+        return Err(format!(
+            "Refusing access to sensitive system file: '{abs_path}'"
+        ));
+    }
+    if low.starts_with("/etc/sudoers.d/")
+        || low.contains("/.ssh/")
+        || low.ends_with("/authorized_keys")
+        || low.ends_with("/id_rsa")
+        || low.ends_with("/id_ed25519")
+        || low.ends_with(".pem")
+        || low.ends_with(".key")
+    {
+        return Err(format!(
+            "Refusing access to credential or privilege path: '{abs_path}'"
+        ));
+    }
+    Ok(())
 }
 
 pub fn load_daemon_config(
@@ -457,6 +491,8 @@ struct RawGlobal {
     max_output_bytes: Option<usize>,
     default_timeout_seconds: Option<u64>,
     gate_mode: Option<bool>,
+    allow_unlisted_servers: Option<bool>,
+    unlisted_staging_root: Option<String>,
     strict_host_key_checking: Option<String>,
     known_hosts_file: Option<String>,
     global_excludes: Option<Vec<String>>,
@@ -467,11 +503,32 @@ struct RawServer {
     #[serde(default)]
     description: String,
     #[serde(default)]
+    allow_exec: bool,
+    #[serde(default)]
     logs: BTreeMap<String, RawLog>,
     #[serde(default)]
     docker: RawDocker,
     #[serde(default)]
     configs: BTreeMap<String, RawConfig>,
+    #[serde(default)]
+    sync_targets: BTreeMap<String, RawServerSyncTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawServerSyncTarget {
+    direction: Option<String>,
+    local_base: String,
+    remote_base: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    use_rrsync: bool,
+    #[serde(default)]
+    allow_delete: bool,
+    max_delete_files: Option<usize>,
+    max_files: Option<usize>,
+    max_size_mb: Option<u64>,
+    exclude_file: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -562,11 +619,18 @@ pub fn load_policy(
         _ => None,
     };
 
+    let unlisted_staging_root = match root.global.unlisted_staging_root {
+        Some(ref s) if !s.is_empty() => expand_path(s, None)?,
+        _ => PathBuf::from("/var/tmp/sshops-staging"),
+    };
+
     let global_cfg = GlobalPolicy {
         plan_ttl_seconds,
         max_output_bytes,
         default_timeout_seconds: root.global.default_timeout_seconds.unwrap_or(20),
         gate_mode: root.global.gate_mode.unwrap_or(true),
+        allow_unlisted_servers: root.global.allow_unlisted_servers.unwrap_or(false),
+        unlisted_staging_root,
         strict_host_key_checking: shkc,
         known_hosts_file,
         global_excludes: root
@@ -684,22 +748,66 @@ pub fn load_policy(
             );
         }
 
+        let mut server_sync_targets = BTreeMap::new();
+        for (target_id, tdata) in sdata.sync_targets {
+            validate_id(&target_id, "sync_target")?;
+            let direction = tdata.direction.unwrap_or_else(|| "push".to_string());
+            if direction != "push" && direction != "pull" {
+                return Err(format!(
+                    "sync_target '{target_id}' on '{alias}' direction must be 'push' or 'pull'."
+                ));
+            }
+            if tdata.local_base.trim().is_empty() {
+                return Err(format!(
+                    "sync_target '{target_id}' on '{alias}' missing local_base."
+                ));
+            }
+            let local_base = expand_path(&tdata.local_base, None)?;
+            let remote_base = validate_abs_posix(
+                &tdata.remote_base,
+                &format!("servers.{alias}.sync_targets.{target_id}.remote_base"),
+            )?;
+            let exclude_file = match tdata.exclude_file {
+                Some(ref s) if !s.is_empty() => Some(expand_path(s, None)?),
+                _ => None,
+            };
+            server_sync_targets.insert(
+                target_id.clone(),
+                SyncTargetPolicy {
+                    target_id,
+                    server: alias.clone(),
+                    direction,
+                    local_base,
+                    remote_base,
+                    description: tdata.description,
+                    use_rrsync: tdata.use_rrsync,
+                    allow_delete: tdata.allow_delete,
+                    max_delete_files: tdata.max_delete_files.unwrap_or(20),
+                    max_files: tdata.max_files.unwrap_or(300),
+                    max_size_mb: tdata.max_size_mb.unwrap_or(50),
+                    exclude_file,
+                },
+            );
+        }
+
         servers.insert(
             alias.clone(),
             ServerPolicy {
                 alias,
                 description: sdata.description,
+                allow_exec: sdata.allow_exec,
                 logs,
                 docker: DockerPolicy {
                     allowed_containers: sdata.docker.allowed_containers,
                     allowed_compose,
                 },
                 configs,
+                sync_targets: server_sync_targets,
             },
         );
     }
 
-    let mut sync_targets = BTreeMap::new();
+    // Backwards-compatible fallback: merge legacy top-level `sync_targets:` into `servers.<alias>.sync_targets`.
     for (target_id, tdata) in root.sync_targets {
         validate_id(&target_id, "sync_target")?;
         validate_alias(&tdata.server, "sync_target server")?;
@@ -729,7 +837,24 @@ pub fn load_policy(
             Some(ref s) if !s.is_empty() => Some(expand_path(s, None)?),
             _ => None,
         };
-        sync_targets.insert(
+        let srv_entry = servers
+            .entry(tdata.server.clone())
+            .or_insert_with(|| ServerPolicy {
+                alias: tdata.server.clone(),
+                description: String::new(),
+                allow_exec: false,
+                logs: BTreeMap::new(),
+                docker: DockerPolicy::default(),
+                configs: BTreeMap::new(),
+                sync_targets: BTreeMap::new(),
+            });
+        if srv_entry.sync_targets.contains_key(&target_id) {
+            return Err(format!(
+                "Duplicate sync_target '{target_id}' for server '{}'.",
+                tdata.server
+            ));
+        }
+        srv_entry.sync_targets.insert(
             target_id.clone(),
             SyncTargetPolicy {
                 target_id,
@@ -751,6 +876,5 @@ pub fn load_policy(
     Ok(OpsPolicy {
         global_cfg,
         servers,
-        sync_targets,
     })
 }

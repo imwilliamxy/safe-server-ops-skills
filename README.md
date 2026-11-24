@@ -63,3 +63,40 @@ cargo build --release
 sudo ./deploy/0-bootstrap-macos.sh <username>
 sudo ./deploy/4-add-server.sh --import-ssh-login --key-mode ai
 ```
+
+## 在其他 AI Agent 中安装本 Skill
+
+本机所有 AI Agent 共享同一个后台守护进程 `opsd` 与无凭据客户端 `opsctl`，无需重复部署后端。
+
+### 方式一：直接发给目标 Agent 的“一键安装提示词”（推荐）
+
+将下面这段提示词直接复制发送给 Claude Code、Codex、Cursor、Antigravity 等任意本地 Coding Agent（把仓库路径替换为你本机实际路径即可）：
+
+```text
+请帮我为当前 Agent 安装本地的 `safe-server-ops` Skill：
+1. Skill 源码目录位于：`/path/to/safe-server-ops-skill/skills/safe-server-ops`（内含 `SKILL.md` 和 `references/`）。
+2. 请识别你当前所属 Agent 的用户级 skills 目录（例如 `~/.claude/skills`、`~/.codex/skills`、`~/.cursor/skills`、`~/.gemini/config/skills` 或 `~/.agents/skills`），将上述目录软链接（`ln -sfn`）为 `<你的skills目录>/safe-server-ops`。
+3. 检查 `which opsctl` 是否在 PATH 中，并运行一次只读命令 `opsctl capabilities` 验证能否正常与本地 `opsd` 通信。
+4. 安全约束：全程严禁读取 `/Users/sshops/`、`~/.ssh/` 或任何 SSH 配置文件与私钥；以后操作生产或远程服务器时，必须按 `safe-server-ops` Skill 规范仅通过 `opsctl` 执行，写操作等待我本人通过 `ops-approve` 批准。
+5. 完成后向我汇报软链路径、`opsctl capabilities` 状态，以及是否需要重开会话使 Skill 生效。
+```
+
+### 方式二：手动软链速查
+
+```bash
+SKILL_SRC="/path/to/safe-server-ops-skill/skills/safe-server-ops"
+
+# Antigravity（0-bootstrap-macos.sh 已自动配置）
+mkdir -p ~/.gemini/config/skills && ln -sfn "$SKILL_SRC" ~/.gemini/config/skills/safe-server-ops
+
+# Claude Code
+mkdir -p ~/.claude/skills && ln -sfn "$SKILL_SRC" ~/.claude/skills/safe-server-ops
+
+# OpenAI Codex CLI
+mkdir -p ~/.codex/skills && ln -sfn "$SKILL_SRC" ~/.codex/skills/safe-server-ops
+
+# Cursor / 通用 Agent Skills 标准目录
+mkdir -p ~/.cursor/skills ~/.agents/skills
+ln -sfn "$SKILL_SRC" ~/.cursor/skills/safe-server-ops
+ln -sfn "$SKILL_SRC" ~/.agents/skills/safe-server-ops
+```

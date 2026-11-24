@@ -8,23 +8,61 @@ use sha2::{Digest, Sha256};
 use similar::TextDiff;
 use zeroize::Zeroizing;
 
-use crate::config::{ConfigFilePolicy, OpsPolicy, ServerProfile};
-use crate::executors::logs::get_server;
-use crate::executors::ssh_exec::SSHExecutor;
+use crate::config::{
+    check_not_sensitive_system_path, validate_abs_posix, ConfigFilePolicy, OpsPolicy, ServerProfile,
+};
+use crate::executors::logs::{resolve_server_access, ServerAccess};
+use crate::executors::ssh_exec::{shell_quote, SSHExecutor};
 use crate::planner::{PlanPayload, PlanStore};
 use crate::redactor::{mask_config_secrets, truncate_output, unmask_config_secrets, Redactor};
 
-fn get_config_policy<'a>(
+struct EffectiveConfig<'a> {
+    cfg: ConfigFilePolicy,
+    profile: &'a ServerProfile,
+    use_gate: bool,
+}
+
+fn resolve_config<'a>(
     policy: &'a OpsPolicy,
     profiles: &'a BTreeMap<String, ServerProfile>,
     server: &str,
     config_id: &str,
-) -> Result<(&'a ConfigFilePolicy, &'a ServerProfile), String> {
-    let (spol, sprof) = get_server(policy, profiles, server)?;
-    let cfg = spol.configs.get(config_id).ok_or_else(|| {
-        format!("Config '{config_id}' is not whitelisted on server '{server}'.")
-    })?;
-    Ok((cfg, sprof))
+) -> Result<EffectiveConfig<'a>, String> {
+    match resolve_server_access(policy, profiles, server)? {
+        ServerAccess::Restricted(spol, profile) => {
+            let cfg = spol.configs.get(config_id).ok_or_else(|| {
+                format!("Config '{config_id}' is not whitelisted on server '{server}'.")
+            })?;
+            Ok(EffectiveConfig {
+                cfg: cfg.clone(),
+                profile,
+                use_gate: policy.global_cfg.gate_mode,
+            })
+        }
+        ServerAccess::DefaultOpen(profile) => {
+            let abs = validate_abs_posix(config_id, "config file path")?;
+            check_not_sensitive_system_path(&abs)?;
+            let parent = Path::new(&abs)
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/tmp".to_string());
+            let cfg = ConfigFilePolicy {
+                config_id: abs.clone(),
+                path: abs,
+                backup_dir: parent,
+                validator: None,
+                reload_action: None,
+                redact_patterns: vec![
+                    r"(?i)(password|passwd|secret|token|api_key)\s*[:=]\s*[^\s;'\x22]+".to_string(),
+                ],
+            };
+            Ok(EffectiveConfig {
+                cfg,
+                profile,
+                use_gate: false,
+            })
+        }
+    }
 }
 
 fn sha256_text(text: &str) -> String {
@@ -34,27 +72,25 @@ fn sha256_text(text: &str) -> String {
 }
 
 fn fetch_remote_raw_config(
-    policy: &OpsPolicy,
+    eff: &EffectiveConfig<'_>,
     ssh: &SSHExecutor,
-    profile: &ServerProfile,
-    cfg: &ConfigFilePolicy,
     redactor: &Redactor,
 ) -> Result<String, String> {
-    let tokens = if policy.global_cfg.gate_mode {
-        vec!["config-read".to_string(), cfg.config_id.clone()]
+    let tokens = if eff.use_gate {
+        vec!["config-read".to_string(), eff.cfg.config_id.clone()]
     } else {
-        vec!["cat".to_string(), "--".to_string(), cfg.path.clone()]
+        vec!["cat".to_string(), "--".to_string(), eff.cfg.path.clone()]
     };
-    let res = ssh.run_remote(profile, &tokens, None, None)?;
+    let res = ssh.run_remote(eff.profile, &tokens, None, None)?;
     if res.exit_code != 0 {
         let err = redactor.redact(
             res.stderr.trim(),
-            Some(profile),
-            &[(cfg.path.as_str(), "[CONFIG_PATH]")],
+            Some(eff.profile),
+            &[(eff.cfg.path.as_str(), "[CONFIG_PATH]")],
         );
         return Err(format!(
             "Failed to read remote config '{}': {err}",
-            cfg.config_id
+            eff.cfg.config_id
         ));
     }
     Ok(res.stdout)
@@ -87,12 +123,16 @@ pub fn config_read(
     server: &str,
     config_id: &str,
 ) -> Result<Value, String> {
-    let (cfg, profile) = get_config_policy(policy, profiles, server, config_id)?;
-    let raw = fetch_remote_raw_config(policy, ssh, profile, cfg, redactor)?;
+    let eff = resolve_config(policy, profiles, server, config_id)?;
+    let raw = fetch_remote_raw_config(&eff, ssh, redactor)?;
     let base_sha = sha256_text(&raw);
-    let (masked, secret_map) = mask_config_secrets(&raw, &cfg.redact_patterns)?;
+    let (masked, secret_map) = mask_config_secrets(&raw, &eff.cfg.redact_patterns)?;
     let safe_content = truncate_output(
-        &redactor.redact(&masked, Some(profile), &[(cfg.path.as_str(), "[CONFIG_PATH]")]),
+        &redactor.redact(
+            &masked,
+            Some(eff.profile),
+            &[(eff.cfg.path.as_str(), "[CONFIG_PATH]")],
+        ),
         policy.global_cfg.max_output_bytes,
     );
     Ok(json!({
@@ -117,13 +157,13 @@ pub fn config_plan(
     base_sha256: &str,
     reason: &str,
 ) -> Result<Value, String> {
-    let (cfg, profile) = get_config_policy(policy, profiles, server, config_id)?;
+    let eff = resolve_config(policy, profiles, server, config_id)?;
     let clean_reason = reason.trim();
     if clean_reason.is_empty() {
         return Err("A non-empty --reason is required for config changes.".to_string());
     }
 
-    let remote_raw = fetch_remote_raw_config(policy, ssh, profile, cfg, redactor)?;
+    let remote_raw = fetch_remote_raw_config(&eff, ssh, redactor)?;
     let current_sha = sha256_text(&remote_raw);
     if current_sha != base_sha256 {
         return Err(format!(
@@ -131,7 +171,7 @@ pub fn config_plan(
         ));
     }
 
-    let (remote_masked, secret_map) = mask_config_secrets(&remote_raw, &cfg.redact_patterns)?;
+    let (remote_masked, secret_map) = mask_config_secrets(&remote_raw, &eff.cfg.redact_patterns)?;
     let candidate_raw = Zeroizing::new(unmask_config_secrets(draft_content, &secret_map)?);
     let new_sha = sha256_text(&candidate_raw);
     if new_sha == current_sha {
@@ -140,41 +180,37 @@ pub fn config_plan(
         );
     }
 
-    local_syntax_check(&cfg.path, &candidate_raw)?;
+    local_syntax_check(&eff.cfg.path, &candidate_raw)?;
 
     let mut validation_output = String::new();
-    if let Some(ref validator) = cfg.validator {
-        if !policy.global_cfg.gate_mode {
-            return Err(
-                "Config validation and writing require gate_mode=true with remote ai-ops-gate."
-                    .to_string(),
+    if let Some(ref validator) = eff.cfg.validator {
+        if eff.use_gate {
+            let vres = ssh.run_remote(
+                eff.profile,
+                &[
+                    "config-validate".to_string(),
+                    eff.cfg.config_id.clone(),
+                    validator.clone(),
+                ],
+                Some(&candidate_raw),
+                None,
+            )?;
+            let combined = [vres.stdout.trim(), vres.stderr.trim()]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            validation_output = redactor.redact(
+                &combined,
+                Some(eff.profile),
+                &[(eff.cfg.path.as_str(), "[CONFIG_PATH]")],
             );
-        }
-        let vres = ssh.run_remote(
-            profile,
-            &[
-                "config-validate".to_string(),
-                cfg.config_id.clone(),
-                validator.clone(),
-            ],
-            Some(&candidate_raw),
-            None,
-        )?;
-        let combined = [vres.stdout.trim(), vres.stderr.trim()]
-            .into_iter()
-            .filter(|s| !s.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
-        validation_output = redactor.redact(
-            &combined,
-            Some(profile),
-            &[(cfg.path.as_str(), "[CONFIG_PATH]")],
-        );
-        if vres.exit_code != 0 {
-            return Err(format!(
-                "Remote validator '{validator}' failed (exit_code={}): {validation_output}",
-                vres.exit_code
-            ));
+            if vres.exit_code != 0 {
+                return Err(format!(
+                    "Remote validator '{validator}' failed (exit_code={}): {validation_output}",
+                    vres.exit_code
+                ));
+            }
         }
     }
 
@@ -187,14 +223,18 @@ pub fn config_plan(
         .to_string();
 
     let safe_diff = truncate_output(
-        &redactor.redact(&diff, Some(profile), &[(cfg.path.as_str(), "[CONFIG_PATH]")]),
+        &redactor.redact(
+            &diff,
+            Some(eff.profile),
+            &[(eff.cfg.path.as_str(), "[CONFIG_PATH]")],
+        ),
         policy.global_cfg.max_output_bytes.min(32768),
     );
 
     let summary = format!(
         "Update config '{config_id}' on '{server}' (validator={}, reload={})",
-        cfg.validator.as_deref().unwrap_or("none"),
-        cfg.reload_action.as_deref().unwrap_or("none"),
+        eff.cfg.validator.as_deref().unwrap_or("none"),
+        eff.cfg.reload_action.as_deref().unwrap_or("none"),
     );
 
     let plan = planner.create(
@@ -239,12 +279,9 @@ pub fn config_apply(
         _ => return Err("Unexpected plan payload for config_apply.".to_string()),
     };
 
-    let (cfg, profile) = get_config_policy(policy, profiles, &server, &config_id)?;
-    if !policy.global_cfg.gate_mode {
-        return Err("Config apply requires gate_mode=true with remote ai-ops-gate.".to_string());
-    }
+    let eff = resolve_config(policy, profiles, &server, &config_id)?;
 
-    let current_raw = fetch_remote_raw_config(policy, ssh, profile, cfg, redactor)?;
+    let current_raw = fetch_remote_raw_config(&eff, ssh, redactor)?;
     if sha256_text(&current_raw) != expected_base_sha {
         return Err(
             "Concurrent modification detected right before apply. Aborted; please re-read and re-plan."
@@ -252,23 +289,43 @@ pub fn config_apply(
         );
     }
 
-    let mut apply_tokens = vec!["config-apply".to_string(), cfg.config_id.clone()];
-    if let Some(ref v) = cfg.validator {
-        apply_tokens.push(format!("--validator={v}"));
-    }
-    if let Some(ref r) = cfg.reload_action {
-        apply_tokens.push(format!("--reload={r}"));
-    }
-
     let timeout = policy.global_cfg.default_timeout_seconds.max(30);
-    let res = ssh.run_remote(profile, &apply_tokens, Some(&candidate_raw), Some(timeout))?;
+    let res = if eff.use_gate {
+        let mut apply_tokens = vec!["config-apply".to_string(), eff.cfg.config_id.clone()];
+        if let Some(ref v) = eff.cfg.validator {
+            apply_tokens.push(format!("--validator={v}"));
+        }
+        if let Some(ref r) = eff.cfg.reload_action {
+            apply_tokens.push(format!("--reload={r}"));
+        }
+        ssh.run_remote(eff.profile, &apply_tokens, Some(&candidate_raw), Some(timeout))?
+    } else {
+        // Direct non-gate atomic backup + temp-file replace over SSH stdin
+        let q_path = shell_quote(&eff.cfg.path);
+        let direct_script = format!(
+            "set -eu; ts=$(date -u +%Y%m%dT%H%M%SZ); bak={q_path}.opsbak.$ts; \
+             cp -p -- {q_path} \"$bak\"; \
+             tmp=$(mktemp {q_path}.apply.XXXXXX); \
+             cat >\"$tmp\"; \
+             chmod --reference={q_path} \"$tmp\" 2>/dev/null || true; \
+             mv -f -- \"$tmp\" {q_path}; \
+             printf '{{\"backup_id\":\"%s\",\"reloaded\":false,\"rolled_back\":false}}\\n' \"$(basename \"$bak\")\""
+        );
+        ssh.run_remote_command_string(eff.profile, &direct_script, Some(&candidate_raw), Some(timeout))?
+    };
 
     let extra = [
-        (cfg.path.as_str(), "[CONFIG_PATH]"),
-        (cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
+        (eff.cfg.path.as_str(), "[CONFIG_PATH]"),
+        (eff.cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
     ];
-    let safe_stdout = truncate_output(&redactor.redact(res.stdout.trim(), Some(profile), &extra), 8192);
-    let safe_stderr = truncate_output(&redactor.redact(res.stderr.trim(), Some(profile), &extra), 8192);
+    let safe_stdout = truncate_output(
+        &redactor.redact(res.stdout.trim(), Some(eff.profile), &extra),
+        8192,
+    );
+    let safe_stderr = truncate_output(
+        &redactor.redact(res.stderr.trim(), Some(eff.profile), &extra),
+        8192,
+    );
 
     let parsed: Value = serde_json::from_str(res.stdout.trim()).unwrap_or(Value::Null);
 
@@ -294,22 +351,22 @@ pub fn config_backups(
     server: &str,
     config_id: &str,
 ) -> Result<Value, String> {
-    let (cfg, profile) = get_config_policy(policy, profiles, server, config_id)?;
-    if !policy.global_cfg.gate_mode {
+    let eff = resolve_config(policy, profiles, server, config_id)?;
+    if !eff.use_gate {
         return Err("Listing config backups requires gate_mode=true.".to_string());
     }
     let res = ssh.run_remote(
-        profile,
-        &["config-backups".to_string(), cfg.config_id.clone()],
+        eff.profile,
+        &["config-backups".to_string(), eff.cfg.config_id.clone()],
         None,
         None,
     )?;
     let extra = [
-        (cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
-        (cfg.path.as_str(), "[CONFIG_PATH]"),
+        (eff.cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
+        (eff.cfg.path.as_str(), "[CONFIG_PATH]"),
     ];
     if res.exit_code != 0 {
-        return Err(redactor.redact(res.stderr.trim(), Some(profile), &extra));
+        return Err(redactor.redact(res.stderr.trim(), Some(eff.profile), &extra));
     }
     let backups: Vec<String> = res
         .stdout
@@ -334,7 +391,7 @@ pub fn config_rollback_plan(
     backup_id: &str,
     reason: &str,
 ) -> Result<Value, String> {
-    let (cfg, _) = get_config_policy(policy, profiles, server, config_id)?;
+    let eff = resolve_config(policy, profiles, server, config_id)?;
     let clean_reason = reason.trim();
     if clean_reason.is_empty() {
         return Err("A non-empty --reason is required for config rollback.".to_string());
@@ -345,7 +402,7 @@ pub fn config_rollback_plan(
 
     let summary = format!(
         "Rollback config '{config_id}' on '{server}' to backup '{backup_id}' (reload={})",
-        cfg.reload_action.as_deref().unwrap_or("none")
+        eff.cfg.reload_action.as_deref().unwrap_or("none")
     );
     let plan = planner.create(
         server.to_string(),
@@ -380,27 +437,27 @@ pub fn config_rollback_apply(
         _ => return Err("Unexpected plan payload for config_rollback.".to_string()),
     };
 
-    let (cfg, profile) = get_config_policy(policy, profiles, &server, &config_id)?;
-    if !policy.global_cfg.gate_mode {
+    let eff = resolve_config(policy, profiles, &server, &config_id)?;
+    if !eff.use_gate {
         return Err("Config rollback requires gate_mode=true.".to_string());
     }
 
     let mut tokens = vec![
         "config-rollback".to_string(),
-        cfg.config_id.clone(),
+        eff.cfg.config_id.clone(),
         backup_id.clone(),
     ];
-    if let Some(ref v) = cfg.validator {
+    if let Some(ref v) = eff.cfg.validator {
         tokens.push(format!("--validator={v}"));
     }
-    if let Some(ref r) = cfg.reload_action {
+    if let Some(ref r) = eff.cfg.reload_action {
         tokens.push(format!("--reload={r}"));
     }
 
-    let res = ssh.run_remote(profile, &tokens, None, None)?;
+    let res = ssh.run_remote(eff.profile, &tokens, None, None)?;
     let extra = [
-        (cfg.path.as_str(), "[CONFIG_PATH]"),
-        (cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
+        (eff.cfg.path.as_str(), "[CONFIG_PATH]"),
+        (eff.cfg.backup_dir.as_str(), "[BACKUP_DIR]"),
     ];
     Ok(json!({
         "plan_token": plan.token,
@@ -409,7 +466,7 @@ pub fn config_rollback_apply(
         "config_id": config_id,
         "backup_id": backup_id,
         "exit_code": res.exit_code,
-        "stdout": truncate_output(&redactor.redact(res.stdout.trim(), Some(profile), &extra), 8192),
-        "stderr": truncate_output(&redactor.redact(res.stderr.trim(), Some(profile), &extra), 8192),
+        "stdout": truncate_output(&redactor.redact(res.stdout.trim(), Some(eff.profile), &extra), 8192),
+        "stderr": truncate_output(&redactor.redact(res.stderr.trim(), Some(eff.profile), &extra), 8192),
     }))
 }

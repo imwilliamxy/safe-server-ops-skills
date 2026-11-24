@@ -11,7 +11,11 @@ Production file syncs use pre-declared `sync_targets` managed by `opsd`. You nev
 ## Step 2: Dry-Run Preview
 
 ```bash
-opsctl rsync preview wp-plugin-release
+# Pre-declared sync_target under a server
+opsctl rsync preview prod-web-1 wp-plugin-release
+
+# Or dynamic rsync on a default_open server (local must stay inside unlisted_staging_root)
+opsctl rsync preview <server> --local <staging_subdir> --remote /var/www/my-app
 ```
 
 `opsd` will:

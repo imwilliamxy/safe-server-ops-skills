@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 
-use crate::config::{OpsPolicy, ServerProfile};
-use crate::executors::logs::{docker_status, get_server};
+use crate::config::{validate_id, OpsPolicy, ServerProfile};
+use crate::executors::logs::{docker_status, resolve_server_access, ServerAccess};
 use crate::executors::ssh_exec::SSHExecutor;
 use crate::planner::{PlanPayload, PlanStore};
 use crate::redactor::{truncate_output, Redactor};
@@ -22,12 +22,19 @@ pub fn docker_restart_plan(
     target: &str,
     reason: &str,
 ) -> Result<Value, String> {
-    let (spol, _) = get_server(policy, profiles, server)?;
-    if !spol.docker.has_target(target) {
-        return Err(format!(
-            "Docker target '{target}' is not whitelisted on server '{server}'."
-        ));
+    match resolve_server_access(policy, profiles, server)? {
+        ServerAccess::Restricted(spol, _) => {
+            if !spol.docker.has_target(target) {
+                return Err(format!(
+                    "Docker target '{target}' is not whitelisted on server '{server}'."
+                ));
+            }
+        }
+        ServerAccess::DefaultOpen(_) => {
+            validate_id(target, "docker container")?;
+        }
     }
+
     let clean_reason = reason.trim();
     if clean_reason.is_empty() {
         return Err("A non-empty --reason is required for Docker restarts.".to_string());
@@ -76,56 +83,18 @@ pub fn docker_restart_apply(
         _ => return Err("Unexpected plan payload for docker_restart.".to_string()),
     };
 
-    let (spol, sprof) = get_server(policy, profiles, &server)?;
+    let access = resolve_server_access(policy, profiles, &server)?;
     let mut extra: Vec<(&str, &str)> = Vec::new();
 
-    let (restart_tokens, logs_tokens) = if let Some((stack_id, svc)) = target.split_once(':') {
-        let stack = &spol.docker.allowed_compose[stack_id];
-        extra.push((stack.workdir.as_str(), "[COMPOSE_DIR]"));
-        if policy.global_cfg.gate_mode {
-            (
-                vec![
-                    "compose-restart".to_string(),
-                    stack_id.to_string(),
-                    svc.to_string(),
-                ],
-                vec![
-                    "compose-logs".to_string(),
-                    stack_id.to_string(),
-                    svc.to_string(),
-                    "30".to_string(),
-                ],
-            )
-        } else {
-            (
-                vec![
-                    "docker".to_string(),
-                    "compose".to_string(),
-                    "--project-directory".to_string(),
-                    stack.workdir.clone(),
-                    "restart".to_string(),
-                    svc.to_string(),
-                ],
-                vec![
-                    "docker".to_string(),
-                    "compose".to_string(),
-                    "--project-directory".to_string(),
-                    stack.workdir.clone(),
-                    "logs".to_string(),
-                    "--tail".to_string(),
-                    "30".to_string(),
-                    svc.to_string(),
-                ],
-            )
-        }
-    } else if policy.global_cfg.gate_mode {
-        (
-            vec!["docker-restart".to_string(), target.clone()],
-            vec!["logs-docker".to_string(), target.clone(), "30".to_string()],
-        )
-    } else {
-        (
-            vec!["docker".to_string(), "restart".to_string(), "--".to_string(), target.clone()],
+    let (sprof, restart_tokens, logs_tokens) = match access {
+        ServerAccess::DefaultOpen(sprof) => (
+            sprof,
+            vec![
+                "docker".to_string(),
+                "restart".to_string(),
+                "--".to_string(),
+                target.clone(),
+            ],
             vec![
                 "docker".to_string(),
                 "logs".to_string(),
@@ -134,7 +103,72 @@ pub fn docker_restart_apply(
                 "--".to_string(),
                 target.clone(),
             ],
-        )
+        ),
+        ServerAccess::Restricted(spol, sprof) => {
+            let (rt, lt) = if let Some((stack_id, svc)) = target.split_once(':') {
+                let stack = &spol.docker.allowed_compose[stack_id];
+                extra.push((stack.workdir.as_str(), "[COMPOSE_DIR]"));
+                if policy.global_cfg.gate_mode {
+                    (
+                        vec![
+                            "compose-restart".to_string(),
+                            stack_id.to_string(),
+                            svc.to_string(),
+                        ],
+                        vec![
+                            "compose-logs".to_string(),
+                            stack_id.to_string(),
+                            svc.to_string(),
+                            "30".to_string(),
+                        ],
+                    )
+                } else {
+                    (
+                        vec![
+                            "docker".to_string(),
+                            "compose".to_string(),
+                            "--project-directory".to_string(),
+                            stack.workdir.clone(),
+                            "restart".to_string(),
+                            svc.to_string(),
+                        ],
+                        vec![
+                            "docker".to_string(),
+                            "compose".to_string(),
+                            "--project-directory".to_string(),
+                            stack.workdir.clone(),
+                            "logs".to_string(),
+                            "--tail".to_string(),
+                            "30".to_string(),
+                            svc.to_string(),
+                        ],
+                    )
+                }
+            } else if policy.global_cfg.gate_mode {
+                (
+                    vec!["docker-restart".to_string(), target.clone()],
+                    vec!["logs-docker".to_string(), target.clone(), "30".to_string()],
+                )
+            } else {
+                (
+                    vec![
+                        "docker".to_string(),
+                        "restart".to_string(),
+                        "--".to_string(),
+                        target.clone(),
+                    ],
+                    vec![
+                        "docker".to_string(),
+                        "logs".to_string(),
+                        "--tail".to_string(),
+                        "30".to_string(),
+                        "--".to_string(),
+                        target.clone(),
+                    ],
+                )
+            };
+            (sprof, rt, lt)
+        }
     };
 
     let timeout = policy.global_cfg.default_timeout_seconds.max(30);

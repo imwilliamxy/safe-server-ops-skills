@@ -6,8 +6,14 @@ global:
   max_output_bytes: 65536
   default_timeout_seconds: 20
   # true = call remote ForceCommand / ai-ops-gate structured actions (recommended for prod)
-  # false = execute tightly escaped read-only commands directly over SSH (for initial transition)
+  # false = execute directly over SSH (allows custom human-approved exec & direct config write)
   gate_mode: true
+  # false = strict deny-by-default (only servers explicitly listed under `servers:` are accessible)
+  # true  = servers in .ssh-servers.env NOT listed under `servers:` inherit default_open read/write
+  #         (credential isolation, full redaction, and human ops-approve for all writes STILL apply!)
+  allow_unlisted_servers: false
+  # Local staging root boundary for dynamic rsync on default_open servers
+  unlisted_staging_root: "/var/tmp/sshops-staging"
   # Set to "yes" in production (pre-populate known_hosts for sshops).
   # May be set to "accept-new" only during initial controlled onboarding.
   strict_host_key_checking: "yes"
@@ -55,17 +61,16 @@ servers:
         redact_patterns:
           - "(?i)(password|secret|token|api_key)\\s*[:=]\\s*\\S+"
 
-sync_targets:
-  wp-plugin-release:
-    description: "Push built plugin release artifacts to prod-web-1"
-    server: prod-web-1
-    direction: push
-    local_base: /var/tmp/sshops-staging/wp-plugin-release
-    remote_base: /var/www/html/wp-content/plugins/my-plugin
-    # Set true when SYNC_KEY_FILE uses ForceCommand rrsync (remote path becomes '.')
-    use_rrsync: true
-    allow_delete: false
-    max_delete_files: 20
-    max_files: 300
-    max_size_mb: 50
-    exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude
+    sync_targets:
+      wp-plugin-release:
+        description: "Push built plugin release artifacts to prod-web-1"
+        direction: push
+        local_base: /var/tmp/sshops-staging/wp-plugin-release
+        remote_base: /var/www/html/wp-content/plugins/my-plugin
+        # Set true when SYNC_KEY_FILE uses ForceCommand rrsync (remote path becomes '.')
+        use_rrsync: true
+        allow_delete: false
+        max_delete_files: 20
+        max_files: 300
+        max_size_mb: 50
+        exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude

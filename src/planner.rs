@@ -1,6 +1,7 @@
 //! Two-phase approval state machine with zeroized secret config storage.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -35,7 +36,15 @@ pub enum PlanPayload {
         target: String,
     },
     RsyncSync {
-        target_id: String,
+        target_id: Option<String>,
+        server: String,
+        direction: String,
+        local_base: PathBuf,
+        remote_base: String,
+        use_rrsync: bool,
+        allow_delete: bool,
+        max_files: usize,
+        max_size_mb: u64,
         manifest_sha256: String,
         local_file_count: usize,
         local_total_bytes: u64,
@@ -54,6 +63,10 @@ pub enum PlanPayload {
         config_id: String,
         backup_id: String,
     },
+    CustomExec {
+        server: String,
+        command: String,
+    },
 }
 
 impl PlanPayload {
@@ -63,6 +76,7 @@ impl PlanPayload {
             PlanPayload::RsyncSync { .. } => "rsync_sync",
             PlanPayload::ConfigApply { .. } => "config_apply",
             PlanPayload::ConfigRollback { .. } => "config_rollback",
+            PlanPayload::CustomExec { .. } => "custom_exec",
         }
     }
 }

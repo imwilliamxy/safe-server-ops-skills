@@ -59,6 +59,26 @@ enum Commands {
         #[command(subcommand)]
         action: ConfigCmd,
     },
+
+    /// Two-phase human-approved custom remote command execution (L2)
+    Exec {
+        #[command(subcommand)]
+        action: ExecCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ExecCmd {
+    /// Propose a remote command for human review (L0 -> requires human approval)
+    Plan {
+        server: String,
+        #[arg(long)]
+        cmd: String,
+        #[arg(long)]
+        reason: String,
+    },
+    /// Execute a human-approved remote command plan (L2)
+    Apply { plan_token: String },
 }
 
 #[derive(Subcommand, Debug)]
@@ -81,8 +101,21 @@ enum DockerCmd {
 
 #[derive(Subcommand, Debug)]
 enum RsyncCmd {
-    /// Dry-run preview & manifest hash (L0 -> requires human approval)
-    Preview { target: String },
+    /// Dry-run preview & manifest hash: `<server> <target>` OR `<server> --local <dir> --remote <dir>`
+    Preview {
+        /// Server logical alias
+        server: String,
+        /// Pre-declared sync_target ID under this server (omit when using --local/--remote)
+        target: Option<String>,
+        #[arg(long)]
+        local: Option<String>,
+        #[arg(long)]
+        remote: Option<String>,
+        #[arg(long, default_value = "push")]
+        direction: String,
+        #[arg(long)]
+        allow_delete: bool,
+    },
     /// Apply an approved rsync plan (L2)
     Apply { plan_token: String },
 }
@@ -233,8 +266,41 @@ fn main() -> ExitCode {
             ),
         },
         Commands::Rsync { action } => match action {
-            RsyncCmd::Preview { target } => ("rsync.preview", json!({ "target": target })),
+            RsyncCmd::Preview {
+                server,
+                target,
+                local,
+                remote,
+                direction,
+                allow_delete,
+            } => {
+                if let Some(t) = target {
+                    ("rsync.preview", json!({ "server": server, "target": t }))
+                } else {
+                    (
+                        "rsync.preview",
+                        json!({
+                            "server": server,
+                            "local": local,
+                            "remote": remote,
+                            "direction": direction,
+                            "allow_delete": allow_delete,
+                        }),
+                    )
+                }
+            }
             RsyncCmd::Apply { plan_token } => ("rsync.apply", json!({ "plan_token": plan_token })),
+        },
+        Commands::Exec { action } => match action {
+            ExecCmd::Plan {
+                server,
+                cmd,
+                reason,
+            } => (
+                "exec.plan",
+                json!({ "server": server, "command": cmd, "reason": reason }),
+            ),
+            ExecCmd::Apply { plan_token } => ("exec.apply", json!({ "plan_token": plan_token })),
         },
         Commands::Config { action } => match action {
             ConfigCmd::Read { server, config_id } => (

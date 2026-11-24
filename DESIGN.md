@@ -183,18 +183,17 @@ servers:
         redact_patterns:                # 读取配置时自动脱敏的敏感字段正则
           - "(?i)(password|secret|token|api_key)\\s*[:=]\\s*\\S+"
 
-# 4. 允许 rsync 同步的目标白名单
-sync_targets:
-  wp-plugin-release:
-    server: prod-web-1
-    direction: push                     # 显式限定 push 或 pull
-    local_base: /var/tmp/sshops-staging/wp-plugin-release
-    remote_base: /var/www/html/wp-content/plugins/my-plugin
-    allow_delete: false                 # 默认禁止 --delete
-    max_delete_files: 20                # 即便允许 delete，超过阈值直接熔断
-    max_files: 300
-    max_size_mb: 50
-    exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude
+      # 4. 允许 rsync 同步的目标白名单（归属在对应服务器下）
+      sync_targets:
+        wp-plugin-release:
+          direction: push                     # 显式限定 push 或 pull
+          local_base: /var/tmp/sshops-staging/wp-plugin-release
+          remote_base: /var/www/html/wp-content/plugins/my-plugin
+          allow_delete: false                 # 默认禁止 --delete
+          max_delete_files: 20                # 即便允许 delete，超过阈值直接熔断
+          max_files: 300
+          max_size_mb: 50
+          exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude
 ```
 
 ---

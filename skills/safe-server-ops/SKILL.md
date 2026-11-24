@@ -29,7 +29,9 @@ Read **only** the reference file matching the current task before running mutati
 opsctl capabilities
 
 # L0: Logs & Docker inspection (read-only)
-opsctl logs <server> <log_id> --lines 100 [--keyword STR]
+#   restricted server  -> use whitelisted log_id / docker target
+#   default_open server -> pass safe absolute path or docker:<container>; omit target to list all containers
+opsctl logs <server> <log_id_or_path> --lines 100 [--keyword STR]
 opsctl docker status <server> [target]
 
 # L1: Docker restart (two-phase: plan -> human approve -> apply)
@@ -37,15 +39,20 @@ opsctl docker restart-plan <server> <target> --reason "<why>"
 opsctl docker restart-apply <plan_token>
 
 # L2: rsync sync (two-phase: preview -> human approve -> apply)
-opsctl rsync preview <target>
+opsctl rsync preview <server> <target_id>
+opsctl rsync preview <server> --local <staging_subdir> --remote <remote_dir>
 opsctl rsync apply <plan_token>
 
-# L2: Config change & rollback (two-phase)
-opsctl config read <server> <config_id>
-opsctl config plan <server> <config_id> --file <draft_path> --base-sha <sha> --reason "<why>"
+# L2: Config change & rollback (two-phase; default_open servers accept safe absolute path as config_id)
+opsctl config read <server> <config_id_or_path>
+opsctl config plan <server> <config_id_or_path> --file <draft_path> --base-sha <sha> --reason "<why>"
 opsctl config apply <plan_token>
 opsctl config rollback-plan <server> <config_id> <backup_id> --reason "<why>"
 opsctl config rollback-apply <plan_token>
+
+# L2: Custom remote command (two-phase; available on default_open servers or allow_exec=true with gate_mode=false)
+opsctl exec plan <server> --cmd "<command>" --reason "<why>"
+opsctl exec apply <plan_token>
 ```
 
 ## Human Approval Handoff

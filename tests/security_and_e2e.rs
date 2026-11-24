@@ -220,26 +220,23 @@ servers:
         reload_action: nginx_reload
         redact_patterns:
           - '(?i)api_secret=[^\s;]+'
-
-sync_targets:
-  plugin-release:
-    server: prod-web
-    direction: push
-    local_base: {}
-    remote_base: /var/www/html/wp-content/plugins/my-plugin
-    use_rrsync: true
-    allow_delete: false
-    max_files: 50
-    max_size_mb: 10
-  strict-delete-target:
-    server: prod-web
-    direction: push
-    local_base: {}
-    remote_base: /var/www/html/static
-    allow_delete: true
-    max_delete_files: 1
-    max_files: 50
-    max_size_mb: 10
+    sync_targets:
+      plugin-release:
+        direction: push
+        local_base: {}
+        remote_base: /var/www/html/wp-content/plugins/my-plugin
+        use_rrsync: true
+        allow_delete: false
+        max_files: 50
+        max_size_mb: 10
+      strict-delete-target:
+        direction: push
+        local_base: {}
+        remote_base: /var/www/html/static
+        allow_delete: true
+        max_delete_files: 1
+        max_files: 50
+        max_size_mb: 10
 "#,
             staging.display(),
             staging.display()
@@ -504,7 +501,7 @@ fn test_rsync_symlink_escape_delete_fuse_and_toctou() {
     state.lock().unwrap().rsync_preview_stdout = "*deleting a.php\n*deleting b.php\n".to_string();
     let fuse = engine.handle_client_request(
         "rsync.preview",
-        &json!({ "target": "strict-delete-target" }),
+        &json!({ "server": "prod-web", "target": "strict-delete-target" }),
     );
     assert_eq!(fuse["ok"], false);
     assert!(fuse["error"]
@@ -516,7 +513,10 @@ fn test_rsync_symlink_escape_delete_fuse_and_toctou() {
     // 2. TOCTOU tampering detection + clean apply
     state.lock().unwrap().rsync_preview_stdout =
         ">f+++++++++ index.php\n>f.st...... style.css\n".to_string();
-    let prev = engine.handle_client_request("rsync.preview", &json!({ "target": "plugin-release" }));
+    let prev = engine.handle_client_request(
+        "rsync.preview",
+        &json!({ "server": "prod-web", "target": "plugin-release" }),
+    );
     assert_eq!(prev["ok"], true);
     let tok = prev["data"]["plan_token"].as_str().unwrap().to_string();
     engine.handle_admin_request(
@@ -533,7 +533,10 @@ fn test_rsync_symlink_escape_delete_fuse_and_toctou() {
         .to_lowercase()
         .contains("toctou"));
 
-    let prev2 = engine.handle_client_request("rsync.preview", &json!({ "target": "plugin-release" }));
+    let prev2 = engine.handle_client_request(
+        "rsync.preview",
+        &json!({ "server": "prod-web", "target": "plugin-release" }),
+    );
     let tok2 = prev2["data"]["plan_token"].as_str().unwrap().to_string();
     engine.handle_admin_request(
         "admin.approve",
@@ -558,7 +561,10 @@ fn test_rsync_symlink_escape_delete_fuse_and_toctou() {
     let outside = tmp.path().join("outside_secret.txt");
     fs::write(&outside, "SECRET").unwrap();
     symlink(&outside, staging.join("leak.txt")).unwrap();
-    let sym = engine.handle_client_request("rsync.preview", &json!({ "target": "plugin-release" }));
+    let sym = engine.handle_client_request(
+        "rsync.preview",
+        &json!({ "server": "prod-web", "target": "plugin-release" }),
+    );
     assert_eq!(sym["ok"], false);
     assert!(sym["error"].as_str().unwrap().to_lowercase().contains("symlink"));
 }
@@ -784,5 +790,217 @@ fn test_example_deploy_configs_are_valid() {
     )
     .unwrap();
     assert!(pol.servers.contains_key("prod-web-1"));
-    assert!(pol.sync_targets.contains_key("wp-plugin-release"));
+    assert!(pol.servers["prod-web-1"]
+        .sync_targets
+        .contains_key("wp-plugin-release"));
+}
+
+#[test]
+fn test_allow_unlisted_servers_default_open_and_exec_approval() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path();
+    let key = root.join("id_ops");
+    fs::write(&key, "ops-key").unwrap();
+
+    let staging_root = root.join("staging-root");
+    let app_stage = staging_root.join("my-app");
+    fs::create_dir_all(&app_stage).unwrap();
+    fs::write(app_stage.join("app.php"), "<?php echo 'ok';\n").unwrap();
+
+    let outside_dir = root.join("outside-dir");
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::write(outside_dir.join("secret.txt"), "nope").unwrap();
+
+    let env_file = root.join(".ssh-servers.env");
+    fs::write(
+        &env_file,
+        format!(
+            "[locked-srv]\nHOST=198.51.100.10\nUSER=locked_user\nPORT=22\nKEY_FILE={0}\n\n\
+             [open-srv]\nHOST=198.51.100.20\nUSER=open_user\nPORT=22\nKEY_FILE={0}\n",
+            key.display()
+        ),
+    )
+    .unwrap();
+
+    let policy_file = root.join("policy.yaml");
+    fs::write(
+        &policy_file,
+        format!(
+            r#"
+global:
+  gate_mode: false
+  allow_unlisted_servers: true
+  unlisted_staging_root: {}
+  strict_host_key_checking: "yes"
+
+servers:
+  locked-srv:
+    description: "Explicitly restricted server"
+    logs:
+      only-app:
+        type: file
+        path: /var/log/app.log
+"#,
+            staging_root.display()
+        ),
+    )
+    .unwrap();
+
+    struct OpenMockRunner;
+    impl CommandRunner for OpenMockRunner {
+        fn run(&self, argv: &[String], _stdin: Option<&str>, _timeout: u64) -> CommandResult {
+            if argv.first().map(String::as_str) == Some("rsync") {
+                return CommandResult {
+                    exit_code: 0,
+                    stdout: ">f+++++++++ app.php\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                };
+            }
+            let cmd = argv.last().map(String::as_str).unwrap_or("");
+            if cmd.starts_with("docker ps ") {
+                return CommandResult {
+                    exit_code: 0,
+                    stdout: "web\trunning\tUp 2 hours\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                };
+            }
+            if cmd.contains("uname -a") {
+                return CommandResult {
+                    exit_code: 0,
+                    stdout: "Linux prod 198.51.100.20 open_user\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                };
+            }
+            if cmd.starts_with("cat ") {
+                return CommandResult {
+                    exit_code: 0,
+                    stdout: "listen 80;\nsecret=super_hidden_99;\n".to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                };
+            }
+            if cmd.contains(".opsbak.") {
+                return CommandResult {
+                    exit_code: 0,
+                    stdout: r#"{"backup_id":"app.conf.opsbak.20261124","reloaded":false,"rolled_back":false}"#.to_string(),
+                    stderr: String::new(),
+                    timed_out: false,
+                };
+            }
+            CommandResult {
+                exit_code: 0,
+                stdout: "ok line\n".to_string(),
+                stderr: String::new(),
+                timed_out: false,
+            }
+        }
+    }
+
+    let profiles = load_server_profiles(&env_file, false, true).unwrap();
+    let known: HashSet<String> = profiles.keys().cloned().collect();
+    let policy = load_policy(&policy_file, Some(&known), false).unwrap();
+    let audit = AuditLogger::new(root.join("audit.jsonl")).unwrap();
+    let engine = OpsEngine::new(profiles, policy, audit, Some(Arc::new(OpenMockRunner)), 0);
+
+    // 1. capabilities exposes open-srv as default_open and locked-srv as restricted without leaking IPs
+    let caps = engine.handle_client_request("capabilities", &json!({}));
+    assert_eq!(caps["ok"], true);
+    assert_eq!(caps["data"]["servers"]["open-srv"]["policy_mode"], "default_open");
+    assert_eq!(caps["data"]["servers"]["locked-srv"]["policy_mode"], "restricted");
+    assert!(!caps.to_string().contains("198.51.100.20"));
+
+    // 2. locked-srv still rejects custom exec (explicit policy overrides allow_unlisted_servers)
+    let locked_exec = engine.handle_client_request(
+        "exec.plan",
+        &json!({ "server": "locked-srv", "command": "uname -a", "reason": "check" }),
+    );
+    assert_eq!(locked_exec["ok"], false);
+
+    // 3. open-srv blocks sensitive system paths in logs & config
+    assert_eq!(
+        engine.handle_client_request("logs", &json!({ "server": "open-srv", "log_id": "/etc/shadow" }))["ok"],
+        false
+    );
+    assert_eq!(
+        engine.handle_client_request("config.read", &json!({ "server": "open-srv", "config_id": "/root/.ssh/authorized_keys" }))["ok"],
+        false
+    );
+
+    // 4. open-srv docker status lists all containers
+    let dstat = engine.handle_client_request("docker.status", &json!({ "server": "open-srv" }));
+    assert_eq!(dstat["ok"], true);
+    assert!(dstat["data"]["targets"][0]["status"].as_str().unwrap().contains("web"));
+
+    // 5. open-srv exec requires human approval and redacts output
+    let eplan = engine.handle_client_request(
+        "exec.plan",
+        &json!({ "server": "open-srv", "command": "uname -a", "reason": "check kernel" }),
+    );
+    assert_eq!(eplan["ok"], true);
+    let etok = eplan["data"]["plan_token"].as_str().unwrap().to_string();
+    assert_eq!(
+        engine.handle_client_request("exec.apply", &json!({ "plan_token": etok }))["ok"],
+        false
+    );
+    engine.handle_admin_request("admin.approve", &json!({ "plan_token": etok, "actor": "human:bob" }));
+    let eapp = engine.handle_client_request("exec.apply", &json!({ "plan_token": etok }));
+    assert_eq!(eapp["ok"], true);
+    let out = eapp["data"]["stdout"].as_str().unwrap();
+    assert!(out.contains("Linux prod"));
+    assert!(!out.contains("198.51.100.20"));
+    assert!(!out.contains("open_user"));
+
+    // 6. open-srv dynamic rsync blocks paths outside unlisted_staging_root, allows inside
+    let bad_sync = engine.handle_client_request(
+        "rsync.preview",
+        &json!({
+            "server": "open-srv",
+            "local": outside_dir.to_str().unwrap(),
+            "remote": "/var/www/app"
+        }),
+    );
+    assert_eq!(bad_sync["ok"], false);
+
+    let ok_sync = engine.handle_client_request(
+        "rsync.preview",
+        &json!({
+            "server": "open-srv",
+            "local": "my-app",
+            "remote": "/var/www/app"
+        }),
+    );
+    assert_eq!(ok_sync["ok"], true);
+    let rtok = ok_sync["data"]["plan_token"].as_str().unwrap().to_string();
+    engine.handle_admin_request("admin.approve", &json!({ "plan_token": rtok, "actor": "human:bob" }));
+    let rapp = engine.handle_client_request("rsync.apply", &json!({ "plan_token": rtok }));
+    assert_eq!(rapp["ok"], true);
+
+    // 7. open-srv direct config read/plan/apply works in gate_mode=false with secret masking
+    let cread = engine.handle_client_request(
+        "config.read",
+        &json!({ "server": "open-srv", "config_id": "/etc/nginx/conf.d/app.conf" }),
+    );
+    assert_eq!(cread["ok"], true);
+    let sha = cread["data"]["base_sha256"].as_str().unwrap().to_string();
+    let masked = cread["data"]["content"].as_str().unwrap().to_string();
+    assert!(!masked.contains("super_hidden_99"));
+    let cplan = engine.handle_client_request(
+        "config.plan",
+        &json!({
+            "server": "open-srv",
+            "config_id": "/etc/nginx/conf.d/app.conf",
+            "draft_content": masked.replace("listen 80;", "listen 443;"),
+            "base_sha256": sha,
+            "reason": "test direct config"
+        }),
+    );
+    assert_eq!(cplan["ok"], true);
+    let ctok = cplan["data"]["plan_token"].as_str().unwrap().to_string();
+    engine.handle_admin_request("admin.approve", &json!({ "plan_token": ctok, "actor": "human:bob" }));
+    let capp = engine.handle_client_request("config.apply", &json!({ "plan_token": ctok }));
+    assert_eq!(capp["ok"], true);
+    assert_eq!(capp["data"]["backup_id"], "app.conf.opsbak.20261124");
 }
