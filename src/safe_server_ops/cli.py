@@ -44,8 +44,8 @@ def _print_result(resp: dict[str, Any], as_json: bool) -> int:
             print(data["diff"])
         print(
             f"\nNext step (human approval required):\n"
-            f"  sudo -u sshops ops-approve --show {data['plan_token']}\n"
-            f"  sudo -u sshops ops-approve approve {data['plan_token']}"
+            f"  sudo -u sshops /Users/sshops/.local/bin/ops-approve --show {data['plan_token']}\n"
+            f"  sudo -u sshops /Users/sshops/.local/bin/ops-approve approve {data['plan_token']}"
         )
         return 0
 

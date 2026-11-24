@@ -1,5 +1,5 @@
 # Example policy for safe-server-ops (opsd)
-# Copy to /var/lib/sshops/policy.yaml and chmod 600 (owned by sshops)
+# Copy to /Users/sshops/.local/config/opsd/policy.yaml and chmod 600 (owned by sshops)
 
 global:
   plan_ttl_seconds: 180
@@ -12,7 +12,7 @@ global:
   # May be set to "accept-new" only during initial controlled onboarding.
   strict_host_key_checking: "yes"
   # Optional explicit known_hosts path owned by sshops
-  known_hosts_file: "/var/lib/sshops/.ssh/known_hosts"
+  known_hosts_file: "/Users/sshops/.ssh/known_hosts"
   global_excludes:
     - ".git/"
     - ".env"
@@ -68,4 +68,4 @@ sync_targets:
     max_delete_files: 20
     max_files: 300
     max_size_mb: 50
-    exclude_file: /var/lib/sshops/excludes/wp-plugin.exclude
+    exclude_file: /Users/sshops/.local/config/opsd/excludes/wp-plugin.exclude

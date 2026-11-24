@@ -11,21 +11,17 @@
     <key>GroupName</key>
     <string>opsclients</string>
 
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/sshops</string>
+    </dict>
+
     <key>ProgramArguments</key>
     <array>
-        <string>/usr/local/venv/safe-server-ops/bin/opsd</string>
-        <string>--servers-env</string>
-        <string>/var/lib/sshops/.ssh-servers.env</string>
-        <string>--policy</string>
-        <string>/var/lib/sshops/policy.yaml</string>
-        <string>--socket</string>
-        <string>/var/run/sshops/ops.sock</string>
-        <string>--admin-socket</string>
-        <string>/var/run/sshops/admin.sock</string>
-        <string>--audit-log</string>
-        <string>/var/log/sshops/audit.jsonl</string>
-        <string>--socket-group</string>
-        <string>opsclients</string>
+        <string>/Users/sshops/.local/bin/opsd</string>
+        <string>--config</string>
+        <string>/Users/sshops/.local/config/opsd/opsd.conf</string>
     </array>
 
     <key>RunAtLoad</key>
@@ -38,9 +34,9 @@
     <integer>63</integer>
 
     <key>StandardOutPath</key>
-    <string>/var/log/sshops/opsd.stdout.log</string>
+    <string>/Users/sshops/.local/state/opsd/opsd.stdout.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/var/log/sshops/opsd.stderr.log</string>
+    <string>/Users/sshops/.local/state/opsd/opsd.stderr.log</string>
 </dict>
 </plist>

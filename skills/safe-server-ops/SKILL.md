@@ -9,7 +9,7 @@ You operate production servers **exclusively** through the credential-less CLI `
 
 ## Non-Negotiable Security Rules
 
-1. **Never touch credentials**: Do NOT read `~/.ssh/`, `~/.local/config/ssh_login/`, `/var/lib/sshops/`, or run raw `ssh` / `scp` / `rsync` against production hosts.
+1. **Never touch credentials**: Do NOT read `~/.ssh/`, `~/.local/config/ssh_login/`, `/Users/sshops/`, or run raw `ssh` / `scp` / `rsync` against production hosts.
 2. **Use logical IDs only**: Always start by discovering allowed server aliases, log IDs, Docker targets, config IDs, and sync targets via `opsctl capabilities`. Never ask the user for server IPs, usernames, or private keys.
 3. **Never self-approve**: All mutating operations (Docker restart, `rsync apply`, config changes, rollbacks) require a two-phase flow (`plan/preview` → human out-of-band approval via `ops-approve` → `apply`). You cannot and must not attempt to bypass approval.
 4. **Respect redacted placeholders**: Responses are automatically redacted (`[REDACTED_HOST]`, `[REDACTED_IP]`, `{{REDACTED_SECRET_N}}`). Keep `{{REDACTED_SECRET_N}}` intact when editing configs; never attempt to extract or replace hidden secrets.
@@ -52,5 +52,5 @@ opsctl config rollback-apply <plan_token>
 
 When any `plan` or `preview` command returns a `plan_token`:
 1. Present the exact target, change summary / Diff, and `plan_token` clearly to the user.
-2. Tell the user to approve it in their own terminal (e.g. `sudo -u sshops ops-approve approve <plan_token>`, or inspect first with `--show <plan_token>`).
+2. Tell the user to approve it in their own terminal (e.g. `sudo -u sshops /Users/sshops/.local/bin/ops-approve approve <plan_token>`, or inspect first with `--show <plan_token>`).
 3. Wait for the user to confirm approval before calling the matching `apply <plan_token>` command.

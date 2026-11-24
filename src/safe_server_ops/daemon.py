@@ -14,7 +14,14 @@ from pathlib import Path
 from typing import Any
 
 from .audit import AuditLogger
-from .config import OpsPolicy, ServerProfile, load_policy, load_server_profiles
+from .config import (
+    DEFAULT_DAEMON_CONFIG_PATH,
+    OpsPolicy,
+    ServerProfile,
+    load_daemon_config,
+    load_policy,
+    load_server_profiles,
+)
 from .executors.config_ops import (
     config_apply,
     config_backups,
@@ -442,14 +449,19 @@ def main(argv: list[str] | None = None) -> int:
         prog="opsd",
         description="Credential-isolated production operations daemon.",
     )
-    parser.add_argument("--servers-env", required=True, help="Path to .ssh-servers.env")
-    parser.add_argument("--policy", required=True, help="Path to policy.yaml")
-    parser.add_argument("--socket", default=DEFAULT_SOCKET_PATH, help="Client Unix socket path")
     parser.add_argument(
-        "--admin-socket", default=DEFAULT_ADMIN_SOCKET_PATH, help="Admin approval Unix socket path (0600)"
+        "--config",
+        default=None,
+        help="Path to opsd.conf (defaults to ~/.local/config/opsd/opsd.conf if present)",
+    )
+    parser.add_argument("--servers-env", default=None, help="Path to .ssh-servers.env (overrides opsd.conf)")
+    parser.add_argument("--policy", default=None, help="Path to policy.yaml (overrides opsd.conf)")
+    parser.add_argument("--socket", default=None, help="Client Unix socket path")
+    parser.add_argument(
+        "--admin-socket", default=None, help="Admin approval Unix socket path (0600)"
     )
     parser.add_argument(
-        "--audit-log", default="/var/log/sshops/audit.jsonl", help="Append-only JSONL audit log path"
+        "--audit-log", default=None, help="Append-only JSONL audit log path"
     )
     parser.add_argument(
         "--socket-group", default=None, help="Optional OS group for client socket (chmod 660)"
@@ -457,6 +469,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--check-ownership",
         action="store_true",
+        default=None,
         help="Require config files to be owned by the current daemon user.",
     )
     parser.add_argument(
@@ -467,26 +480,64 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     os.umask(0o077)
+
+    conf_path: Path | None = None
+    if args.config:
+        conf_path = Path(args.config).expanduser()
+    elif args.servers_env is None and args.policy is None:
+        default_conf = DEFAULT_DAEMON_CONFIG_PATH.expanduser()
+        if default_conf.exists():
+            conf_path = default_conf
+
+    daemon_cfg = (
+        load_daemon_config(conf_path, check_ownership=bool(args.check_ownership))
+        if conf_path is not None
+        else None
+    )
+
+    servers_env = Path(args.servers_env).expanduser() if args.servers_env else (daemon_cfg.servers_env if daemon_cfg else None)
+    policy_path = Path(args.policy).expanduser() if args.policy else (daemon_cfg.policy if daemon_cfg else None)
+    if servers_env is None or policy_path is None:
+        parser.error(
+            "Either --config (or ~/.local/config/opsd/opsd.conf) OR both --servers-env and --policy must be provided."
+        )
+
+    client_socket = Path(args.socket).expanduser() if args.socket else (
+        daemon_cfg.socket if daemon_cfg else Path(DEFAULT_SOCKET_PATH)
+    )
+    admin_socket = Path(args.admin_socket).expanduser() if args.admin_socket else (
+        daemon_cfg.admin_socket if daemon_cfg else Path(DEFAULT_ADMIN_SOCKET_PATH)
+    )
+    audit_log = Path(args.audit_log).expanduser() if args.audit_log else (
+        daemon_cfg.audit_log if daemon_cfg else Path("~/.local/state/opsd/audit.jsonl").expanduser()
+    )
+    socket_group = args.socket_group if args.socket_group is not None else (
+        daemon_cfg.socket_group if daemon_cfg else None
+    )
+    check_ownership = args.check_ownership if args.check_ownership is not None else (
+        daemon_cfg.check_ownership if daemon_cfg else False
+    )
+
     profiles = load_server_profiles(
-        args.servers_env,
-        check_ownership=args.check_ownership,
+        servers_env,
+        check_ownership=check_ownership,
         require_keys_exist=not args.allow_missing_keys,
     )
     policy = load_policy(
-        args.policy,
+        policy_path,
         known_servers=set(profiles.keys()),
-        check_ownership=args.check_ownership,
+        check_ownership=check_ownership,
     )
-    audit = AuditLogger(args.audit_log)
+    audit = AuditLogger(audit_log)
     engine = OpsEngine(profiles=profiles, policy=policy, audit=audit)
 
-    client_mode = 0o660 if args.socket_group else 0o600
+    client_mode = 0o660 if socket_group else 0o600
     daemon = OpsDaemon(
         engine=engine,
-        client_socket=Path(args.socket),
-        admin_socket=Path(args.admin_socket),
+        client_socket=client_socket,
+        admin_socket=admin_socket,
         client_mode=client_mode,
-        socket_group=args.socket_group,
+        socket_group=socket_group,
     )
 
     stop_event = threading.Event()
@@ -499,7 +550,7 @@ def main(argv: list[str] | None = None) -> int:
 
     daemon.start_background()
     print(
-        f"opsd listening on client={args.socket} admin={args.admin_socket}",
+        f"opsd listening on client={client_socket} admin={admin_socket}",
         file=sys.stderr,
         flush=True,
     )

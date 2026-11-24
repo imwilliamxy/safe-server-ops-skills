@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from safe_server_ops.config import ConfigError, load_policy, load_server_profiles
+from safe_server_ops.config import ConfigError, load_daemon_config, load_policy, load_server_profiles
 from safe_server_ops.redactor import (
     Redactor,
     SecretPlaceholderError,
@@ -156,6 +156,33 @@ servers:
         out = truncate_output(text, 1024)
         self.assertLessEqual(len(out.encode("utf-8")), 1024)
         self.assertIn("[OUTPUT TRUNCATED]", out)
+
+    def test_load_daemon_config_literal_and_reject_symlink(self) -> None:
+        conf = self.root / "opsd.conf"
+        conf.write_text(
+            """
+# opsd config
+servers_env = .ssh-servers.env
+policy = policy.yaml
+socket = /var/run/sshops/ops.sock
+admin_socket = /var/run/sshops/admin.sock
+audit_log = audit.jsonl
+socket_group = opsclients
+check_ownership = true
+""",
+            encoding="utf-8",
+        )
+        dcfg = load_daemon_config(conf)
+        self.assertEqual(dcfg.servers_env, self.root / ".ssh-servers.env")
+        self.assertEqual(dcfg.policy, self.root / "policy.yaml")
+        self.assertEqual(dcfg.audit_log, self.root / "audit.jsonl")
+        self.assertEqual(dcfg.socket_group, "opsclients")
+        self.assertTrue(dcfg.check_ownership)
+
+        link_conf = self.root / "link.conf"
+        os.symlink(conf, link_conf)
+        with self.assertRaises(ConfigError):
+            load_daemon_config(link_conf)
 
 
 if __name__ == "__main__":

@@ -2,6 +2,7 @@
 .ssh-servers.env
 *.env
 !deploy/*.example.env
+opsd.conf
 policy.yaml
 *.key
 *.pem

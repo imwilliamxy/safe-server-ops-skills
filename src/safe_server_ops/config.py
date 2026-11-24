@@ -126,6 +126,20 @@ class OpsPolicy:
     sync_targets: dict[str, SyncTargetPolicy]
 
 
+@dataclass(frozen=True)
+class DaemonConfig:
+    servers_env: Path
+    policy: Path
+    socket: Path
+    admin_socket: Path
+    audit_log: Path
+    socket_group: str | None = None
+    check_ownership: bool = False
+
+
+DEFAULT_DAEMON_CONFIG_PATH = Path("~/.local/config/opsd/opsd.conf")
+
+
 def _ensure_safe_regular_file(path: Path, label: str, check_ownership: bool = False) -> None:
     if path.is_symlink():
         raise ConfigError(f"{label} must not be a symlink: {path}")
@@ -443,3 +457,70 @@ def load_policy(
         )
 
     return OpsPolicy(global_cfg=global_cfg, servers=servers, sync_targets=sync_targets)
+
+
+def _parse_bool(raw: str, field_name: str) -> bool:
+    low = raw.strip().lower()
+    if low in {"true", "1", "yes", "on"}:
+        return True
+    if low in {"false", "0", "no", "off"}:
+        return False
+    raise ConfigError(f"Invalid boolean value for '{field_name}': {raw!r}")
+
+
+def load_daemon_config(
+    conf_path: Path | str,
+    *,
+    check_ownership: bool = False,
+) -> DaemonConfig:
+    """Parse opsd.conf strictly as literal key=value pairs (never shell-evaluated)."""
+    path = Path(conf_path).expanduser()
+    _ensure_safe_regular_file(path, "Daemon config file", check_ownership=check_ownership)
+
+    allowed_keys = {
+        "servers_env",
+        "policy",
+        "socket",
+        "admin_socket",
+        "audit_log",
+        "socket_group",
+        "check_ownership",
+    }
+    raw_fields: dict[str, str] = {}
+    for lineno, raw_line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw_line.rstrip("\r").lstrip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" not in line:
+            raise ConfigError(f"Malformed line {lineno} in opsd.conf.")
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = _strip_literal_quotes(value.strip())
+        if key not in allowed_keys:
+            raise ConfigError(f"Unsupported key '{key}' at line {lineno} in opsd.conf.")
+        if key in raw_fields:
+            raise ConfigError(f"Duplicate key '{key}' at line {lineno} in opsd.conf.")
+        raw_fields[key] = value
+
+    for req in ("servers_env", "policy"):
+        if not raw_fields.get(req):
+            raise ConfigError(f"opsd.conf is missing required key '{req}'.")
+
+    base_dir = path.parent
+
+    def _resolve_path(val: str) -> Path:
+        if val.startswith("~/"):
+            return Path.home() / val[2:]
+        p = Path(val)
+        return p if p.is_absolute() else (base_dir / p)
+
+    socket_group_raw = raw_fields.get("socket_group", "").strip()
+    return DaemonConfig(
+        servers_env=_resolve_path(raw_fields["servers_env"]),
+        policy=_resolve_path(raw_fields["policy"]),
+        socket=_resolve_path(raw_fields.get("socket", "/var/run/sshops/ops.sock")),
+        admin_socket=_resolve_path(raw_fields.get("admin_socket", "/var/run/sshops/admin.sock")),
+        audit_log=_resolve_path(raw_fields.get("audit_log", "~/.local/state/opsd/audit.jsonl")),
+        socket_group=socket_group_raw or None,
+        check_ownership=_parse_bool(raw_fields.get("check_ownership", "false"), "check_ownership"),
+    )

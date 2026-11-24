@@ -53,7 +53,20 @@ uv run opsctl capabilities
 
 ## 生产真隔离部署（macOS `sshops` + `launchd`）
 
-1. 参考 [deploy/setup-macos-isolation.sh](deploy/setup-macos-isolation.sh) 准备独立用户 `sshops`、组 `opsclients` 及 `/var/lib/sshops`、`/var/run/sshops`、`/var/tmp/sshops-staging`。
-2. 在生产服务器部署 [remote/ai-ops-ssh-entry.sh](remote/ai-ops-ssh-entry.sh) 与 [remote/ai-ops-gate.sh](remote/ai-ops-gate.sh)，按需配置 `rrsync`。
-3. 使用 [deploy/com.local.safe-server-opsd.plist](deploy/com.local.safe-server-opsd.plist) 将 `opsd` 注册为开机自启守护进程。
-4. 将 `skills/safe-server-ops/` 软链或复制到你的 Agent skills 目录（例如 `~/.gemini/config/skills/safe-server-ops`）。
+完整可复制的 8 步安装、服务端加固、验收与排障手册请直接阅读 **[INSTALL.md](INSTALL.md)**。
+
+简要流程：
+1. 创建隐藏无登录隔离用户 `sshops`（家目录 `/Users/sshops`，`UserShell /usr/bin/false`）并运行 [deploy/setup-macos-isolation.sh](deploy/setup-macos-isolation.sh) 初始化目录权限。
+2. 将配置复制到 `/Users/sshops/.local/config/opsd/`（`chmod 600`，`chown sshops`）：
+   * `opsd.conf`（模板：[deploy/opsd.example.conf](deploy/opsd.example.conf)）
+   * `.ssh-servers.env`（模板：[deploy/ssh-servers.example.env](deploy/ssh-servers.example.env)）
+   * `policy.yaml`（模板：[deploy/policy.example.yaml](deploy/policy.example.yaml)）
+3. 运行 [deploy/install.sh](deploy/install.sh) 完成双端隔离安装：
+   ```bash
+   sudo ./deploy/install.sh <username>
+   ```
+   * 隔离账号侧：`/Users/sshops/.local/bin/opsd` 与 `/Users/sshops/.local/bin/ops-approve`（`/Users/sshops` 权限 `700`，日常账号与 AI 均不可读、不可篡改）；
+   * 日常账号侧：`/Users/<username>/.local/bin/opsctl`（零凭据客户端，仅连接 `/var/run/sshops/ops.sock`）。
+4. 在生产服务器部署 [remote/ai-ops-ssh-entry.sh](remote/ai-ops-ssh-entry.sh) 与 [remote/ai-ops-gate.sh](remote/ai-ops-gate.sh)，按需配置 `rrsync`。
+5. 使用 [deploy/com.local.safe-server-opsd.plist](deploy/com.local.safe-server-opsd.plist) 注册 `launchd` 开机自启（自动以 `opsd --config /Users/sshops/.local/config/opsd/opsd.conf` 启动）。
+6. 将 `skills/safe-server-ops/` 软链到你的 Agent skills 目录（例如 `~/.gemini/config/skills/safe-server-ops`）。
