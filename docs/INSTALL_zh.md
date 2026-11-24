@@ -46,7 +46,7 @@
 
 ## 一、本机 macOS 一键隔离部署（推荐）
 
-如果希望一条命令完成全部本机初始化（建受限用户 `sshops` + 建目录 + 安装 3 个 Rust 二进制 + 生成 AI 专用 Key + 初始化配置模板 + 软链 Skill + 注册并启动 `launchd`），直接运行 [deploy/0-bootstrap-macos.sh](deploy/0-bootstrap-macos.sh)：
+如果希望一条命令完成全部本机初始化（建受限用户 `sshops` + 建目录 + 安装 3 个 Rust 二进制 + 生成 AI 专用 Key + 初始化配置模板 + 软链 Skill + 注册并启动 `launchd`），直接运行 [deploy/0-bootstrap-macos.sh](../deploy/0-bootstrap-macos.sh)：
 
 ```bash
 cd /path/to/safe-server-ops-skill
@@ -82,7 +82,7 @@ sudo launchctl kickstart -k system/com.local.safe-server-opsd
 
 ### 第 1 步：创建共享组 `opsclients` 与隐藏无登录用户 `sshops`
 
-直接运行自动建号脚本 [deploy/1-create-sshops-user.sh](deploy/1-create-sshops-user.sh)（自动挑选 450~499 间的空闲 UID、锁死密码、禁用交互 Shell、从登录界面隐藏并设置家目录为 `/Users/sshops`）：
+直接运行自动建号脚本 [deploy/1-create-sshops-user.sh](../deploy/1-create-sshops-user.sh)（自动挑选 450~499 间的空闲 UID、锁死密码、禁用交互 Shell、从登录界面隐藏并设置家目录为 `/Users/sshops`）：
 
 ```bash
 cd /path/to/safe-server-ops-skill
@@ -100,7 +100,7 @@ sudo ./deploy/1-create-sshops-user.sh <username>
 
 ### 第 2 步：初始化隔离目录结构与权限
 
-进入项目根目录运行初始化脚本 [deploy/2-setup-macos-isolation.sh](deploy/2-setup-macos-isolation.sh)：
+进入项目根目录运行初始化脚本 [deploy/2-setup-macos-isolation.sh](../deploy/2-setup-macos-isolation.sh)：
 
 ```bash
 cd /path/to/safe-server-ops-skill
@@ -207,7 +207,7 @@ sudo chmod 600 \
 
 ### 推荐方式：生产机一键脚本安装
 
-将仓库中的 `remote/` 目录上传到生产服务器后运行 [remote/install-remote-gate.sh](remote/install-remote-gate.sh)：
+将仓库中的 `remote/` 目录上传到生产服务器后运行 [remote/install-remote-gate.sh](../remote/install-remote-gate.sh)：
 
 ```bash
 # 复用已有用户（例如 ubuntu），不新建账号：
@@ -240,7 +240,7 @@ sudo chmod 700 /home/ai-ops/.ssh
 
 #### 6.2 安装并配置门控脚本
 
-将本仓库的 [remote/ai-ops-ssh-entry.sh](remote/ai-ops-ssh-entry.sh) 与 [remote/ai-ops-gate.sh](remote/ai-ops-gate.sh) 上传到生产服务器的 `/usr/local/bin/`：
+将本仓库的 [remote/ai-ops-ssh-entry.sh](../remote/ai-ops-ssh-entry.sh) 与 [remote/ai-ops-gate.sh](../remote/ai-ops-gate.sh) 上传到生产服务器的 `/usr/local/bin/`：
 
 ```bash
 sudo chown root:root /usr/local/bin/ai-ops-ssh-entry.sh /usr/local/bin/ai-ops-gate.sh

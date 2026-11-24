@@ -26,3 +26,6 @@ staging/
 
 # Local changelog
 CHANGELOG.md
+
+# Agent-generated working files
+ai-agent-generated-files/

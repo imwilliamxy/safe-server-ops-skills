@@ -346,7 +346,9 @@ servers:
 safe-server-ops-skill/
 ├── Cargo.toml
 ├── Cargo.lock
-├── DESIGN.md / INSTALL.md / README.md
+├── README.md / README_zh.md
+├── docs/
+│   └── DESIGN.md / INSTALL.md
 ├── skills/safe-server-ops/        # 渐进式 Skill 目录（安装到 Agent 的 skills 目录）
 │   ├── SKILL.md
 │   └── references/
