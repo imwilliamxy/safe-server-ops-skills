@@ -17,16 +17,19 @@ Credential-isolated production server operations gateway (**Progressive Skill + 
   * **L2 `rsync` 同步**：软链逃逸扫描、文件数/体积限制、`--dry-run` 预演、Manifest SHA256 防篡改（TOCTOU）、`--delete` 熔断、兼容服务端 `rrsync`。
   * **L2 配置修改与回滚**：密文占位符脱敏读取、占位符防篡改还原、并发乐观锁（`base_sha256`）、本地 JSON/YAML + 远端校验器（如 `nginx -t`）预检、Unified Diff、自动备份与重载失败自动回滚。
 
-## 快速本地开发与测试
+## 快速本地开发与测试（`uv` 管理）
 
 ```bash
-# 1. 创建虚拟环境并安装（仅依赖 PyYAML）
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -e .
+# 1. 同步虚拟环境与依赖（仅依赖 PyYAML，自动生成/复用 .venv）
+uv sync
 
 # 2. 运行完整单元与双 Socket 端到端测试
-python3 -m unittest discover -s tests -v
+uv run python -m unittest discover -s tests -v
+
+# 3. 查看三个 CLI 入口帮助
+uv run opsctl --help
+uv run opsd --help
+uv run ops-approve --help
 ```
 
 ## 快速过渡体验（本机单用户启动）
@@ -36,7 +39,7 @@ python3 -m unittest discover -s tests -v
 cp deploy/ssh-servers.example.env /tmp/dev-servers.env
 cp deploy/policy.example.yaml /tmp/dev-policy.yaml
 # 按需编辑上述两个文件后启动 opsd：
-opsd \
+uv run opsd \
   --servers-env /tmp/dev-servers.env \
   --policy /tmp/dev-policy.yaml \
   --socket /tmp/ops.sock \
@@ -45,7 +48,7 @@ opsd \
 
 # 另一个终端里用 opsctl 测试（AI Agent 只需要这两个环境变量和 opsctl）：
 export OPS_SOCKET=/tmp/ops.sock
-opsctl capabilities
+uv run opsctl capabilities
 ```
 
 ## 生产真隔离部署（macOS `sshops` + `launchd`）
